@@ -77,10 +77,12 @@ class UtteranceChunker:
             return None
         return pcm
 
-    def feed(self, frame: np.ndarray) -> Optional[np.ndarray]:
+    def feed(self, frame: np.ndarray, prob: float | None = None) -> Optional[np.ndarray]:
         """Feed one FRAME_SAMPLES float32 frame; returns a finished utterance
-        (float32, 16 kHz, includes pre-roll) or None."""
-        speech = self.is_speech(frame) >= self.threshold
+        (float32, 16 kHz, includes pre-roll) or None. Pass `prob` when the
+        caller already ran the VAD on this frame (mic tester shares the
+        per-frame Silero score) — is_speech is skipped then."""
+        speech = (self.is_speech(frame) if prob is None else prob) >= self.threshold
         if not self._active:
             if speech:
                 self._active = True
@@ -126,9 +128,28 @@ class SileroVAD:
             self._model.reset_states()
 
 
-def mic_frames(device: int | None = None) -> Iterator[np.ndarray]:
+def list_input_devices() -> list[dict]:
+    """Input-capable audio devices: [{index, name, default}]. Lazy import."""
+    import sounddevice as sd
+
+    default_idx = None
+    try:
+        default_idx = sd.default.device[0]   # (input, output) pair
+    except Exception:
+        pass
+    out = []
+    for i, d in enumerate(sd.query_devices()):
+        if d.get("max_input_channels", 0) > 0:
+            out.append({"index": i, "name": d["name"],
+                        "default": i == default_idx})
+    return out
+
+
+def mic_frames(device: int | None = None, stop=None) -> Iterator[np.ndarray]:
     """Blocking generator of 512-sample float32 mono frames from the default
-    (or given) input device. Lazy sounddevice import; run in a worker thread."""
+    (or given) input device. Lazy sounddevice import; run in a worker thread.
+    `stop`: optional threading.Event — generator ends (and the stream closes)
+    soon after it is set, enabling live device switching."""
     import queue
 
     import sounddevice as sd
@@ -145,5 +166,8 @@ def mic_frames(device: int | None = None) -> Iterator[np.ndarray]:
 
     with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
                         blocksize=FRAME_SAMPLES, device=device, callback=cb):
-        while True:
-            yield q.get()
+        while stop is None or not stop.is_set():
+            try:
+                yield q.get(timeout=0.25)    # timeout: re-check stop regularly
+            except queue.Empty:
+                continue

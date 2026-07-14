@@ -11,6 +11,7 @@ with this file.
 | `intent`    | `name: commit\|undo\|scratch`   | UI button pressed (voice spotters are server-side) |
 | `edit`      | `action: <Action JSON>`         | keyboard-sourced edit (MathQuill save, delete button) |
 | `resolve`   | `pending_id, verdict: commit\|scratch` | resolve a pending proposal |
+| `mic`       | `action: list\|select\|test_start\|test_stop, device?: int` | mic device selection + level tester (only when server runs `--mic`; otherwise `error`) |
 
 ## Server → Client
 | type         | fields                                   | meaning |
@@ -21,6 +22,8 @@ with this file.
 | `applied`    | `action, assigned_id?, doc_context`      | DocState mutated (after commit / keyboard edit / undo) |
 | `reply`      | `text` / `question, candidates`          | text_reply or clarify from engine |
 | `error`      | `message, action?`                       | e.g. unknown target id |
+| `mics`       | `devices: [{index, name, default}], current` | input device list; sent on connect in mic mode, re-broadcast after `select` |
+| `miclevel`   | `rms, prob`                              | ~10 Hz while the mic tester is on (`prob` = Silero speech probability) |
 
 ## Flow
 1. Utterance arrives (text or audio) → `status:thinking` → engine →

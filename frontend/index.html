@@ -131,6 +131,18 @@
   }
   .chip{border-color:var(--line); color:var(--ink-soft); font-size:.65rem; padding:4px 8px}
   .chip:hover{border-color:var(--ink); color:var(--ink); background:var(--card)}
+  /* ---------- mic panel ---------- */
+  .miclabel{font-family:'IBM Plex Mono',monospace; font-size:.68rem; color:var(--ink-soft)}
+  #micsel{
+    font-family:'IBM Plex Mono',monospace; font-size:.68rem; padding:4px 6px; max-width:280px;
+    border:1px solid var(--line); background:var(--card); color:var(--ink); border-radius:3px;
+  }
+  #levelwrap{
+    flex:1; min-width:120px; max-width:320px; height:12px;
+    border:1px solid var(--line); border-radius:3px; background:var(--card); overflow:hidden;
+  }
+  #levelbar{height:100%; width:0%; background:var(--rail); transition:width .08s linear}
+  #levelbar.speech{background:var(--commit)}
   @media (max-width:900px){
     main{grid-template-columns:1fr}
     #consolewrap{border-left:none; border-top:2px solid var(--ink); padding-bottom:40px; min-height:auto}
@@ -175,6 +187,13 @@
     <button id="commitbtn">Commit</button>
     <button id="scratchbtn" class="warn">Scratch that</button>
     <button id="undobtn">Undo</button>
+  </div>
+  <div class="row" id="microw" style="margin-top:8px; display:none">
+    <label for="micsel" class="miclabel">mic</label>
+    <select id="micsel" title="Input device (server-side)"></select>
+    <button id="mictest" class="mini">test mic</button>
+    <div id="levelwrap" title="input level; green = VAD hears speech"><div id="levelbar"></div></div>
+    <span id="micvad" class="miclabel"></span>
   </div>
   <div class="row" style="margin-top:8px">
     <button class="chip" data-say="e equals m c squared">“e equals m c squared”</button>
@@ -312,8 +331,45 @@ function handleServerFrame(msg){
       pending = null; renderPending();
       log(msg.action||{action:'error'}, 'discarded', msg.message);
       break;
+    case 'mics': {
+      // server-side device list -> dropdown (panel only shows in mic mode)
+      const row = document.getElementById('microw');
+      const sel = document.getElementById('micsel');
+      row.style.display = 'flex';
+      sel.innerHTML = '';
+      for(const d of msg.devices){
+        const o = document.createElement('option');
+        o.value = d.index;
+        o.textContent = `[${d.index}] ${d.name}` + (d.default ? ' (default)' : '');
+        if(msg.current !== null ? d.index === msg.current : d.default) o.selected = true;
+        sel.appendChild(o);
+      }
+      break;
+    }
+    case 'miclevel': {
+      const bar = document.getElementById('levelbar');
+      bar.style.width = Math.min(100, msg.rms * 400) + '%';
+      bar.classList.toggle('speech', msg.prob >= 0.5);
+      document.getElementById('micvad').textContent = 'vad ' + msg.prob.toFixed(2);
+      break;
+    }
   }
 }
+
+// ---------- mic panel wiring ----------
+let micTesting = false;
+document.getElementById('micsel').onchange = e=>{
+  wsSend({type:'mic', action:'select', device: parseInt(e.target.value, 10)});
+};
+document.getElementById('mictest').onclick = ()=>{
+  micTesting = !micTesting;
+  wsSend({type:'mic', action: micTesting ? 'test_start' : 'test_stop'});
+  document.getElementById('mictest').textContent = micTesting ? 'stop test' : 'test mic';
+  if(!micTesting){
+    document.getElementById('levelbar').style.width = '0%';
+    document.getElementById('micvad').textContent = '';
+  }
+};
 
 function connectWs(){
   try{
@@ -331,6 +387,9 @@ function connectWs(){
     setNet(false);
     document.getElementById('engname').textContent = 'local toy router';
     document.getElementById('vstate').textContent = '';
+    document.getElementById('microw').style.display = 'none';
+    micTesting = false;
+    document.getElementById('mictest').textContent = 'test mic';
     log({action:'ws_closed', note:'local fallback'}, 'info');
   };
   ws.onerror = ()=>{ setNet(false); };

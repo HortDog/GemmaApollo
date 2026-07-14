@@ -33,9 +33,11 @@ def make_engine(name: str):
     raise ValueError(name)
 
 def build_app(engine_name: str = "mock", mic: bool = False,
-              wakeword_models: dict[str, str] | None = None) -> FastAPI:
+              wakeword_models: dict[str, str] | None = None,
+              mic_device: int | None = None) -> FastAPI:
     """wakeword_models: {model_path_or_name: intent} for the Phase 5 spotters
-    (requires mic=True). None -> auto-load DEFAULT_MODELS paths that exist."""
+    (requires mic=True). None -> auto-load DEFAULT_MODELS paths that exist.
+    mic_device: input device index (None = system default)."""
     app = FastAPI(title="GemmaApollo Scribe")
     engine = make_engine(engine_name)
     doc = DocState()
@@ -43,6 +45,10 @@ def build_app(engine_name: str = "mock", mic: bool = False,
     clients: set[WebSocket] = set()
     pending: dict = {}  # pending_id -> {"action", "transcript", "audio_wav"}
     counter = {"n": 0}
+    # Mic supervisor hooks, populated by start_mic (dispatch runs earlier in
+    # the file; tests stub these). Keys: list / select / set_testing.
+    micctl: dict = {}
+    app.state.micctl = micctl
 
     # ------------------------------------------------------------ transport
     async def send(ws: WebSocket, obj: dict):
@@ -183,6 +189,27 @@ def build_app(engine_name: str = "mock", mic: bool = False,
             await apply_and_broadcast(a, "committed", source="keyboard")
             # TODO(Phase 6): edited_after gold-label linkage.
 
+        elif t == "mic":
+            # Device selection + tester (see PROTOCOL.md). No-op frames when
+            # the server runs without --mic.
+            if not micctl:
+                await send(ws, {"type": "error",
+                                "message": "mic mode is off (start with --mic)"})
+                return
+            action = msg.get("action")
+            if action == "list":
+                await broadcast(await micctl["list"]())
+            elif action == "select":
+                await micctl["select"](int(msg["device"]))
+            elif action == "test_start":
+                micctl["set_testing"](True)
+                await broadcast({"type": "status", "state": "listening",
+                                 "detail": "mic test on"})
+            elif action == "test_stop":
+                micctl["set_testing"](False)
+                await broadcast({"type": "status", "state": "listening",
+                                 "detail": "mic test off"})
+
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket):
         await ws.accept()
@@ -190,6 +217,11 @@ def build_app(engine_name: str = "mock", mic: bool = False,
         await send(ws, {"type": "status",
                         "state": "listening" if mic else "idle",
                         "detail": f"engine={engine.name}"})
+        if micctl:
+            try:
+                await send(ws, await micctl["list"]())
+            except Exception:
+                pass  # device enumeration failure must not block the session
         try:
             while True:
                 raw = await ws.receive_text()
@@ -211,15 +243,24 @@ def build_app(engine_name: str = "mock", mic: bool = False,
     if mic:
         @app.on_event("startup")
         async def start_mic():
+            import numpy as np
+
+            from .audio.vad import SileroVAD, UtteranceChunker, list_input_devices, mic_frames
+
             loop = asyncio.get_running_loop()
             utterances: asyncio.Queue = asyncio.Queue()
             intents: asyncio.Queue = asyncio.Queue()
+            levels: asyncio.Queue = asyncio.Queue()
+            # Shared across device switches: Silero + oww models load once.
+            vad = SileroVAD()
+            state = {"device": mic_device, "stop": None, "thread": None,
+                     "testing": False, "scorer": None}
 
-            def make_spotter():
-                """Phase 5 wake-word spotters; None if no models available."""
+            def make_scorer():
+                """Phase 5 wake-word scorer; None if no models available."""
                 from pathlib import Path as P
 
-                from .audio.wakewords import DEFAULT_MODELS, IntentSpotter, OWWScorer
+                from .audio.wakewords import DEFAULT_MODELS, OWWScorer
                 mapping = wakeword_models
                 if mapping is None:
                     mapping = {p: intent for intent, p in DEFAULT_MODELS.items()
@@ -229,29 +270,75 @@ def build_app(engine_name: str = "mock", mic: bool = False,
                           "(train with tools/wakewords/)", flush=True)
                     return None
                 print(f"wakewords: spotting {list(mapping.values())}", flush=True)
-                return IntentSpotter(score=OWWScorer(mapping))
+                return OWWScorer(mapping)
 
-            def capture():  # daemon thread: mic -> (VAD chunker | spotters)
-                from .audio.vad import SileroVAD, UtteranceChunker, mic_frames
+            state["scorer"] = make_scorer()
+
+            def capture(device, stop):  # daemon thread: mic -> chunker|spotter|levels
+                from .audio.wakewords import IntentSpotter
                 try:
-                    chunker = UtteranceChunker(is_speech=SileroVAD())
-                    spotter = make_spotter()
-                    for frame in mic_frames():
+                    vad.reset()  # don't carry VAD state across devices
+                    chunker = UtteranceChunker(is_speech=vad)
+                    spotter = (IntentSpotter(score=state["scorer"])
+                               if state["scorer"] else None)
+                    for i, frame in enumerate(mic_frames(device, stop=stop)):
+                        prob = vad(frame)
                         # Spotters see every frame, in parallel with the VAD —
                         # a hit bypasses the engine entirely (app intent).
                         if spotter is not None:
                             hit = spotter.feed(frame)
                             if hit:
                                 loop.call_soon_threadsafe(intents.put_nowait, hit)
-                        u = chunker.feed(frame)
+                        u = chunker.feed(frame, prob=prob)
                         if u is not None:
                             loop.call_soon_threadsafe(utterances.put_nowait, u)
+                        if state["testing"] and i % 3 == 0:  # ~10 Hz
+                            rms = float(np.sqrt(float((frame ** 2).mean())))
+                            loop.call_soon_threadsafe(
+                                levels.put_nowait, {"rms": rms, "prob": prob})
                 except Exception as e:  # no input device, driver error, ...
                     msg = f"mic capture failed: {type(e).__name__}: {e}"
                     print(msg, flush=True)
                     asyncio.run_coroutine_threadsafe(
                         broadcast({"type": "status", "state": "idle",
                                    "detail": msg}), loop)
+
+            def start_capture(device):
+                stop = threading.Event()
+                t = threading.Thread(target=capture, args=(device, stop),
+                                     daemon=True, name="mic")
+                state.update(device=device, stop=stop, thread=t)
+                t.start()
+
+            def stop_capture():
+                if state["stop"] is not None:
+                    state["stop"].set()
+                    state["thread"].join(timeout=2)
+
+            # ---- micctl: hooks used by the ws dispatch (PROTOCOL.md `mic`) ----
+            async def mics_frame():
+                devices = await asyncio.to_thread(list_input_devices)
+                return {"type": "mics", "devices": devices,
+                        "current": state["device"]}
+
+            async def select(device: int):
+                def probe():
+                    import sounddevice as sd
+                    sd.check_input_settings(device=device, samplerate=16000,
+                                            channels=1)
+                try:
+                    await asyncio.to_thread(probe)
+                except Exception as e:
+                    await broadcast({"type": "error",
+                                     "message": f"mic device {device}: {e}"})
+                    return
+                await asyncio.to_thread(stop_capture)
+                start_capture(device)
+                await broadcast(await mics_frame())
+
+            micctl["list"] = mics_frame
+            micctl["select"] = select
+            micctl["set_testing"] = lambda on: state.update(testing=on)
 
             async def consume_utterances():
                 while True:
@@ -266,9 +353,15 @@ def build_app(engine_name: str = "mock", mic: bool = False,
                     name = await intents.get()
                     await handle_intent(name, source="wakeword")
 
-            threading.Thread(target=capture, daemon=True, name="mic").start()
+            async def consume_levels():
+                while True:
+                    lvl = await levels.get()
+                    await broadcast({"type": "miclevel", **lvl})
+
+            start_capture(mic_device)
             asyncio.create_task(consume_utterances())
             asyncio.create_task(consume_intents())
+            asyncio.create_task(consume_levels())
 
     app.mount("/", StaticFiles(directory=Path(__file__).resolve()
               .parents[2] / "frontend", html=True), name="frontend")

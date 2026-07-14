@@ -62,6 +62,19 @@ def test_brief_pause_does_not_split():
     assert len(out) == 1                     # pause < end_silence_ms
 
 
+def test_feed_with_precomputed_prob_skips_is_speech():
+    def boom(_):
+        raise AssertionError("is_speech must not run when prob is given")
+    c = UtteranceChunker(is_speech=boom, end_silence_ms=500)
+    probs = [0.9] * n_frames(1000) + [0.0] * n_frames(600)
+    out = []
+    for p, f in zip(probs, frames(len(probs))):
+        u = c.feed(f, prob=p)
+        if u is not None:
+            out.append(u)
+    assert len(out) == 1
+
+
 def test_wav_bytes_roundtrip():
     import io
     import wave

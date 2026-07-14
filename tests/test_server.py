@@ -138,6 +138,48 @@ def test_training_record_logs_preaction_context(tmp_path, monkeypatch):
     assert second["engine_action"]["latex"] == "b"
 
 
+def test_mic_frames_error_when_mic_off():
+    client = TestClient(build_app("mock"))          # no mic mode
+    with client.websocket_connect("/ws") as ws:
+        _drain_until(ws, "status")
+        ws.send_json({"type": "mic", "action": "list"})
+        err = _drain_until(ws, "error")
+        assert "mic mode is off" in err["message"]
+
+
+def test_mic_frames_with_stubbed_supervisor():
+    app = build_app("mock")                          # stub micctl like start_mic would
+    calls = {"selected": None, "testing": None}
+
+    async def mics_frame():
+        return {"type": "mics", "current": 1,
+                "devices": [{"index": 1, "name": "Fake Mic", "default": True}]}
+
+    async def select(device):
+        calls["selected"] = device
+
+    app.state.micctl["list"] = mics_frame
+    app.state.micctl["select"] = select
+    app.state.micctl["set_testing"] = lambda on: calls.update(testing=on)
+
+    client = TestClient(app)
+    with client.websocket_connect("/ws") as ws:
+        _drain_until(ws, "status")
+        m = _drain_until(ws, "mics")                 # sent on connect
+        assert m["devices"][0]["name"] == "Fake Mic" and m["current"] == 1
+
+        ws.send_json({"type": "mic", "action": "select", "device": 3})
+        ws.send_json({"type": "mic", "action": "test_start"})
+        _drain_until(ws, "status", detail="mic test on")
+        assert calls == {"selected": 3, "testing": True}
+        ws.send_json({"type": "mic", "action": "test_stop"})
+        _drain_until(ws, "status", detail="mic test off")
+        assert calls["testing"] is False
+
+        ws.send_json({"type": "mic", "action": "list"})
+        _drain_until(ws, "mics")
+
+
 def test_undo_after_commit():
     client = TestClient(build_app("mock"))
     with client.websocket_connect("/ws") as ws:
