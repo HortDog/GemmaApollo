@@ -1,0 +1,22 @@
+[
+  {
+    "wav": "euler_identity.wav",
+    "spoken": "e to the i pi plus one equals zero",
+    "latex": "e^{i\\pi} + 1 = 0"
+  },
+  {
+    "wav": "gaussian_integral.wav",
+    "spoken": "the integral from zero to infinity of e to the minus x squared dx equals the square root of pi over two",
+    "latex": "\\int_0^{\\infty} e^{-x^2} dx = \\frac{\\sqrt{\\pi}}{2}"
+  },
+  {
+    "wav": "emc2_sapi.wav",
+    "spoken": "e equals m c squared",
+    "latex": "E = mc^2"
+  },
+  {
+    "wav": "energy_sapi.wav",
+    "spoken": "one half m v squared plus m g h",
+    "latex": "\\frac{1}{2}mv^2 + mgh"
+  }
+]
