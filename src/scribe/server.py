@@ -32,7 +32,10 @@ def make_engine(name: str):
         return GemmaEngine()
     raise ValueError(name)
 
-def build_app(engine_name: str = "mock", mic: bool = False) -> FastAPI:
+def build_app(engine_name: str = "mock", mic: bool = False,
+              wakeword_models: dict[str, str] | None = None) -> FastAPI:
+    """wakeword_models: {model_path_or_name: intent} for the Phase 5 spotters
+    (requires mic=True). None -> auto-load DEFAULT_MODELS paths that exist."""
     app = FastAPI(title="GemmaApollo Scribe")
     engine = make_engine(engine_name)
     doc = DocState()
@@ -134,6 +137,33 @@ def build_app(engine_name: str = "mock", mic: bool = False) -> FastAPI:
         await broadcast({"type": "status",
                          "state": "listening" if mic else "idle"})
 
+    # ------------------------------------------------------------ intents
+    async def handle_intent(name: str, source: str = "ui"):
+        """App-layer intents — UI buttons and wake-word spotters share this
+        exact path. Never engine Actions."""
+        if source == "wakeword":
+            # PLAN.md Phase 5: log every spotter fire (false-positive audit).
+            logger.log(audio_bytes=None, doc_context=doc.render_context(),
+                       transcript=None,
+                       engine_action={"intent": name, "source": source},
+                       final_action=None, verdict="app_intent",
+                       engine=engine.name, latency_ms={})
+            await broadcast({"type": "status",
+                             "state": "listening" if mic else "idle",
+                             "detail": f"wakeword: {name}"})
+        if name == "undo":
+            if doc.undo():
+                await broadcast({"type": "applied",
+                                 "action": {"action": "undo"},
+                                 "doc_context": doc.render_context()})
+            else:
+                await broadcast({"type": "status", "state": "idle",
+                                 "detail": "nothing to undo"})
+        elif name in ("commit", "scratch") and pending:
+            # Resolve the oldest outstanding proposal.
+            pid = next(iter(pending))
+            await resolve_pending(pid, "commit" if name == "commit" else "scratch")
+
     # ------------------------------------------------------------ dispatch
     async def dispatch(ws: WebSocket, msg: dict):
         """Handle one client frame (see PROTOCOL.md)."""
@@ -146,21 +176,7 @@ def build_app(engine_name: str = "mock", mic: bool = False) -> FastAPI:
             await resolve_pending(msg["pending_id"], msg["verdict"])
 
         elif t == "intent":
-            # App-layer intents (UI buttons now; voice spotters in
-            # Phase 5 hit this exact path). Never engine Actions.
-            name = msg["name"]
-            if name == "undo":
-                if doc.undo():
-                    await broadcast({"type": "applied",
-                                     "action": {"action": "undo"},
-                                     "doc_context": doc.render_context()})
-                else:
-                    await broadcast({"type": "status", "state": "idle",
-                                     "detail": "nothing to undo"})
-            elif name in ("commit", "scratch") and pending:
-                # Resolve the oldest outstanding proposal.
-                pid = next(iter(pending))
-                await resolve_pending(pid, "commit" if name == "commit" else "scratch")
+            await handle_intent(msg["name"], source="ui")
 
         elif t == "edit":
             a = ACTION_ADAPTER.validate_python(msg["action"])
@@ -197,12 +213,36 @@ def build_app(engine_name: str = "mock", mic: bool = False) -> FastAPI:
         async def start_mic():
             loop = asyncio.get_running_loop()
             utterances: asyncio.Queue = asyncio.Queue()
+            intents: asyncio.Queue = asyncio.Queue()
 
-            def capture():  # daemon thread: mic -> VAD -> chunker -> queue
+            def make_spotter():
+                """Phase 5 wake-word spotters; None if no models available."""
+                from pathlib import Path as P
+
+                from .audio.wakewords import DEFAULT_MODELS, IntentSpotter, OWWScorer
+                mapping = wakeword_models
+                if mapping is None:
+                    mapping = {p: intent for intent, p in DEFAULT_MODELS.items()
+                               if P(p).exists()}
+                if not mapping:
+                    print("wakewords: no models found — spotters disabled "
+                          "(train with tools/wakewords/)", flush=True)
+                    return None
+                print(f"wakewords: spotting {list(mapping.values())}", flush=True)
+                return IntentSpotter(score=OWWScorer(mapping))
+
+            def capture():  # daemon thread: mic -> (VAD chunker | spotters)
                 from .audio.vad import SileroVAD, UtteranceChunker, mic_frames
                 try:
                     chunker = UtteranceChunker(is_speech=SileroVAD())
+                    spotter = make_spotter()
                     for frame in mic_frames():
+                        # Spotters see every frame, in parallel with the VAD —
+                        # a hit bypasses the engine entirely (app intent).
+                        if spotter is not None:
+                            hit = spotter.feed(frame)
+                            if hit:
+                                loop.call_soon_threadsafe(intents.put_nowait, hit)
                         u = chunker.feed(frame)
                         if u is not None:
                             loop.call_soon_threadsafe(utterances.put_nowait, u)
@@ -213,15 +253,22 @@ def build_app(engine_name: str = "mock", mic: bool = False) -> FastAPI:
                         broadcast({"type": "status", "state": "idle",
                                    "detail": msg}), loop)
 
-            async def consume():
+            async def consume_utterances():
                 while True:
                     u = await utterances.get()
                     await broadcast({"type": "status", "state": "heard",
                                      "detail": f"utterance {len(u)/16000:.1f}s"})
                     await process_utterance(audio=u)
 
+            async def consume_intents():
+                # Separate task so commit/undo work while the engine is busy.
+                while True:
+                    name = await intents.get()
+                    await handle_intent(name, source="wakeword")
+
             threading.Thread(target=capture, daemon=True, name="mic").start()
-            asyncio.create_task(consume())
+            asyncio.create_task(consume_utterances())
+            asyncio.create_task(consume_intents())
 
     app.mount("/", StaticFiles(directory=Path(__file__).resolve()
               .parents[2] / "frontend", html=True), name="frontend")

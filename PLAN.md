@@ -78,16 +78,24 @@ next phase until they pass. Pure-logic phases (1, 2) need no GPU.
   check needs a human voice — run `uv run scribe serve --engine s2l --mic`
   and say "e equals m c squared".
 
-## Phase 5 — Wake-word spotters
-- [ ] `audio/wakewords.py`: openWakeWord models for commit / undo /
-      scratch-that running continuously on the raw stream (parallel to VAD).
-- [ ] Train spotters with piper-sample-generator; negatives from recorded
-      math dictation (must never fire mid-equation). Training scripts in
-      `tools/wakewords/`.
-- [ ] Spotter hits bypass the engine entirely → app-layer intent → ws status.
-- **Accept:** commit/undo/scratch by voice work while the engine is busy
-  processing an utterance; false-positive rate ~0 over a 10-minute dictation
-  session (log every fire).
+## Phase 5 — Wake-word spotters ✅ runtime (model training = user/Colab step)
+- [x] `audio/wakewords.py`: pure IntentSpotter (1280-sample chunking,
+      per-intent thresholds, 2 s refractory) + lazy OWWScorer
+      (openwakeword, onnx backend on Windows), running on every mic frame
+      in parallel with the VAD chunker.
+- [x] Training scripts + procedure in `tools/wakewords/`
+      (piper-sample-generator positives, session-dictation negatives,
+      oww training notebook). ⚠ The actual commit/undo/scratch_that models
+      still need training (piper-sample-generator is Linux/Colab-friendly);
+      server auto-loads `models/wakewords/*.onnx` once they exist.
+- [x] Spotter hits bypass the engine entirely → shared app-intent path
+      (same code as UI buttons) → ws status; every fire logged as
+      `verdict: app_intent` for the false-positive audit.
+- **Accept:** plumbing verified with the pretrained hey_jarvis model mapped
+  to commit: 60 s silence → 0 fires; synthesized "hey jarvis" clip → exactly
+  1 commit fire; intents consumed on a separate task so they work while the
+  engine is busy. ⚠ The 10-minute-dictation false-positive test runs after
+  the real models are trained (fires are logged; audit data/sessions).
 
 ## Phase 6 — Training-data logger
 - [ ] `datalogger.py`: per session dir under `data/sessions/<ts>/`:
