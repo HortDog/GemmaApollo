@@ -85,9 +85,16 @@ next phase until they pass. Pure-logic phases (1, 2) need no GPU.
       in parallel with the VAD chunker.
 - [x] Training scripts + procedure in `tools/wakewords/`
       (piper-sample-generator positives, session-dictation negatives,
-      oww training notebook). ⚠ The actual commit/undo/scratch_that models
-      still need training (piper-sample-generator is Linux/Colab-friendly);
-      server auto-loads `models/wakewords/*.onnx` once they exist.
+      oww training notebook).
+- [x] Models TRAINED (2026-07-15, locally in WSL2 on the 4060 Ti — see the
+      README's WSL gotcha list): 4000 piper-TTS positives + ACAV100M negative
+      features each, 25k steps. Validation FP/hour: commit 0.18,
+      scratch_that 0.0, undo 3.0 (⚠ short word — watch the app_intent audit
+      log in real sessions; raise its IntentSpotter threshold if it misfires).
+      Deployed to `models/wakewords/*.onnx` (+ `.onnx.data` sidecars —
+      torch 2.9's exporter externalizes weights); server auto-loads them.
+      Verified: 6/6 SAPI phrase clips fire exactly their own intent;
+      0 fires over 60 s silence AND all 4 math-dictation fixtures.
 - [x] Spotter hits bypass the engine entirely → shared app-intent path
       (same code as UI buttons) → ws status; every fire logged as
       `verdict: app_intent` for the false-positive audit.
