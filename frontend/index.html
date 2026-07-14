@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GemmaApollo Scribe — UI Prototype</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/mathquill/0.10.1/mathquill.min.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Spectral:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mathquill/0.10.1/mathquill.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+<style>
+  :root{
+    --paper:#F4F6F2; --grid:#E2E8DF; --ink:#1C2B33; --ink-soft:#5C6B70;
+    --rail:#8B9AA0; --pending:#C97F10; --pending-wash:#FBF3E2;
+    --commit:#2E6E6A; --commit-wash:#E8F1EF; --danger:#A6452F;
+    --card:#FFFFFF; --line:#D8DFDB;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    font-family:'Spectral',Georgia,serif; color:var(--ink);
+    background:var(--paper);
+    background-image:linear-gradient(var(--grid) 1px,transparent 1px),
+                     linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+    background-size:28px 28px;
+    min-height:100vh; display:flex; flex-direction:column;
+  }
+  header{
+    display:flex; align-items:baseline; gap:14px; flex-wrap:wrap;
+    padding:18px 26px 12px; border-bottom:2px solid var(--ink);
+    background:rgba(244,246,242,.92); backdrop-filter:blur(2px);
+  }
+  header h1{font-size:1.25rem; font-weight:600; margin:0; letter-spacing:.01em}
+  header .sub{font-family:'IBM Plex Mono',monospace; font-size:.72rem; color:var(--ink-soft)}
+  .engine{
+    margin-left:auto; font-family:'IBM Plex Mono',monospace; font-size:.72rem;
+    display:flex; align-items:center; gap:8px; color:var(--ink-soft);
+  }
+  .engine select{
+    font-family:inherit; font-size:.72rem; padding:4px 6px;
+    border:1px solid var(--line); background:var(--card); color:var(--ink); border-radius:3px;
+  }
+  main{
+    flex:1; display:grid; grid-template-columns:minmax(0,1.55fr) minmax(280px,1fr);
+    gap:0; align-items:start; max-width:1240px; width:100%; margin:0 auto;
+  }
+  /* ---------- document ---------- */
+  #docwrap{padding:26px 20px 140px 8px}
+  .docline{
+    display:grid; grid-template-columns:74px 1fr auto; align-items:center;
+    background:var(--card); border:1px solid var(--line); border-left:none;
+    margin:0 0 10px 0; min-height:56px; border-radius:0 4px 4px 0;
+    position:relative;
+  }
+  .docline .railcell{
+    height:100%; display:flex; flex-direction:column; justify-content:center; align-items:center;
+    border-right:1px solid var(--line); padding:8px 0;
+    font-family:'IBM Plex Mono',monospace; font-size:.72rem; color:var(--rail);
+  }
+  .docline .railcell .lid{font-weight:500; color:var(--commit)}
+  .docline .railcell .lbl{font-size:.62rem; color:var(--ink-soft); margin-top:3px; text-align:center; padding:0 4px}
+  .docline .mathcell{padding:10px 16px; overflow-x:auto; cursor:text}
+  .docline .mathcell:focus-visible{outline:2px solid var(--commit); outline-offset:2px}
+  .docline .tools{display:flex; gap:4px; padding-right:10px; opacity:0; transition:opacity .12s}
+  .docline:hover .tools, .docline:focus-within .tools{opacity:1}
+  @media (prefers-reduced-motion:reduce){ .docline .tools{transition:none} }
+  .docline.editing{border-color:var(--commit); box-shadow:0 0 0 1px var(--commit)}
+  .mq-holder{min-width:220px; font-size:1.15rem}
+  .mathquill-edit{border:none !important; box-shadow:none !important; width:100%}
+  /* ---------- pending strip ---------- */
+  #pending{
+    border:1.5px dashed var(--pending); background:var(--pending-wash);
+    border-radius:4px; margin:4px 0 12px 74px; padding:10px 14px;
+  }
+  #pending .ptag{
+    font-family:'IBM Plex Mono',monospace; font-size:.68rem; color:var(--pending);
+    text-transform:uppercase; letter-spacing:.08em; margin-bottom:6px; display:block;
+  }
+  #pending .pmath{font-size:1.15rem; margin-bottom:8px; overflow-x:auto}
+  /* ---------- buttons ---------- */
+  button{
+    font-family:'IBM Plex Mono',monospace; font-size:.72rem; cursor:pointer;
+    border:1px solid var(--ink); background:var(--card); color:var(--ink);
+    padding:6px 12px; border-radius:3px;
+  }
+  button:hover{background:var(--ink); color:var(--paper)}
+  button:focus-visible{outline:2px solid var(--commit); outline-offset:2px}
+  button.primary{background:var(--commit); border-color:var(--commit); color:#fff}
+  button.primary:hover{background:#245853}
+  button.warn{border-color:var(--danger); color:var(--danger)}
+  button.warn:hover{background:var(--danger); color:#fff}
+  button.mini{padding:3px 8px; font-size:.65rem; border-color:var(--line); color:var(--ink-soft)}
+  button.mini:hover{border-color:var(--ink); background:var(--card); color:var(--ink)}
+  /* ---------- console ---------- */
+  #consolewrap{
+    border-left:2px solid var(--ink); background:rgba(255,255,255,.6);
+    padding:18px 18px 140px; min-height:100%; 
+  }
+  #consolewrap h2{
+    font-family:'IBM Plex Mono',monospace; font-size:.72rem; font-weight:500;
+    text-transform:uppercase; letter-spacing:.1em; color:var(--ink-soft); margin:0 0 4px;
+  }
+  #consolewrap .note{font-size:.78rem; color:var(--ink-soft); margin:0 0 12px; line-height:1.45}
+  .logentry{
+    font-family:'IBM Plex Mono',monospace; font-size:.68rem; line-height:1.5;
+    border:1px solid var(--line); background:var(--card); border-radius:3px;
+    padding:8px 10px; margin-bottom:8px; word-break:break-word; white-space:pre-wrap;
+  }
+  .logentry .st{float:right; font-size:.6rem; text-transform:uppercase; letter-spacing:.06em}
+  .logentry.committed .st{color:var(--commit)}
+  .logentry.pending .st{color:var(--pending)}
+  .logentry.discarded .st{color:var(--danger)}
+  .logentry.info .st{color:var(--ink-soft)}
+  /* ---------- dock ---------- */
+  #dock{
+    position:fixed; left:0; right:0; bottom:0; background:var(--card);
+    border-top:2px solid var(--ink); padding:12px 26px 14px;
+  }
+  #dock .row{max-width:1240px; margin:0 auto; display:flex; gap:8px; align-items:center; flex-wrap:wrap}
+  #utterance{
+    flex:1; min-width:220px; font-family:'Spectral',serif; font-size:.95rem;
+    padding:9px 12px; border:1px solid var(--ink); border-radius:3px; background:var(--paper);
+  }
+  #utterance:focus-visible{outline:2px solid var(--commit); outline-offset:1px}
+  #dock .hint{
+    max-width:1240px; margin:8px auto 0; font-family:'IBM Plex Mono',monospace;
+    font-size:.62rem; color:var(--ink-soft); line-height:1.5;
+  }
+  .chip{border-color:var(--line); color:var(--ink-soft); font-size:.65rem; padding:4px 8px}
+  .chip:hover{border-color:var(--ink); color:var(--ink); background:var(--card)}
+  @media (max-width:900px){
+    main{grid-template-columns:1fr}
+    #consolewrap{border-left:none; border-top:2px solid var(--ink); padding-bottom:40px; min-height:auto}
+    #docwrap{padding-bottom:20px}
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>GemmaApollo Scribe</h1>
+  <span class="sub">ui prototype · line-by-line · voice + MathQuill</span>
+  <div class="engine">
+    <label for="engsel">engine</label>
+    <select id="engsel" title="Both engines must emit the same Action objects">
+      <option>Whisper-large-v3 → Qwen2.5 (S2L)</option>
+      <option>Gemma 4 12B (GemmaApollo)</option>
+    </select>
+  </div>
+</header>
+
+<main>
+  <div id="docwrap">
+    <div id="doc"></div>
+    <div id="pendingslot"></div>
+    <div style="margin:6px 0 0 74px">
+      <button id="addline" class="mini" title="Add a typed MathQuill line">+ typed line</button>
+    </div>
+  </div>
+
+  <aside id="consolewrap">
+    <h2>Engine console — Action log</h2>
+    <p class="note">Every utterance becomes one <em>Action</em> object. This JSON is the contract both
+    engines implement, and each committed entry here is one (audio, doc&nbsp;state)&nbsp;→&nbsp;action
+    training triple for GemmaApollo.</p>
+    <div id="log"></div>
+  </aside>
+</main>
+
+<div id="dock">
+  <div class="row">
+    <input id="utterance" type="text" autocomplete="off"
+      placeholder="Simulate an utterance… e.g.  e equals m c squared   ·   change e1 to \frac{1}{2}mv^2   ·   delete e2">
+    <button id="send" class="primary">Speak</button>
+    <button id="commitbtn">Commit</button>
+    <button id="scratchbtn" class="warn">Scratch that</button>
+    <button id="undobtn">Undo</button>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <button class="chip" data-say="e equals m c squared">“e equals m c squared”</button>
+    <button class="chip" data-say="the integral from zero to infinity of e to the minus x d x">“integral 0→∞ e⁻ˣ dx”</button>
+    <button class="chip" data-say="one half m v squared">“one half m v squared”</button>
+    <button class="chip" data-say="change e1 to \frac{1}{2}m v^2 + C">“change e1 to …”</button>
+    <button class="chip" data-say="insert after e1 F = ma">“insert after e1 …”</button>
+    <button class="chip" data-say="label e1 kinetic energy">“label e1 …”</button>
+  </div>
+  <div class="hint">
+    In the real app this input is your microphone: VAD-chunked utterances go to the engine; “commit / scratch that / undo”
+    are openWakeWord spotters handled instantly by the app. Raw LaTeX is accepted here as a stand-in for the
+    speech→LaTeX stage. Click any committed line to edit it with MathQuill (Enter saves, Esc cancels).
+  </div>
+</div>
+
+<script>
+const MQ = MathQuill.getInterface(2);
+
+// ---------- document state ----------
+let lines = [];            // {id, latex, label}
+let nextId = 1;
+let pending = null;        // {kind:'append'|'replace'|'insert', target?, after?, latex, source}
+let undoStack = [];
+let editingId = null;
+
+function snapshot(){ undoStack.push(JSON.parse(JSON.stringify(lines))); if(undoStack.length>50) undoStack.shift(); }
+function docContext(){ return lines.map(l=>`[${l.id}] ${l.latex}`).join('  '); }
+
+// ---------- rendering ----------
+function renderDoc(){
+  const doc = document.getElementById('doc');
+  doc.innerHTML = '';
+  for(const l of lines){
+    const row = document.createElement('div');
+    row.className = 'docline'; row.dataset.id = l.id;
+    const rail = document.createElement('div');
+    rail.className='railcell';
+    rail.innerHTML = `<span class="lid">[${l.id}]</span>` + (l.label?`<span class="lbl">${escapeHtml(l.label)}</span>`:'');
+    const mc = document.createElement('div');
+    mc.className='mathcell'; mc.tabIndex = 0;
+    mc.setAttribute('role','button');
+    mc.setAttribute('aria-label',`Edit line ${l.id}`);
+    const tools = document.createElement('div');
+    tools.className='tools';
+    tools.innerHTML = `<button class="mini" data-act="edit">edit</button><button class="mini" data-act="del">delete</button>`;
+    row.append(rail, mc, tools);
+    doc.appendChild(row);
+
+    if(editingId === l.id){
+      row.classList.add('editing');
+      const holder = document.createElement('span');
+      holder.className='mq-holder';
+      mc.appendChild(holder);
+      const field = MQ.MathField(holder, {
+        handlers:{
+          enter: ()=> finishEdit(l.id, field.latex())
+        }
+      });
+      field.latex(l.latex);
+      field.focus();
+      holder.addEventListener('keydown', e=>{ if(e.key==='Escape'){ editingId=null; renderDoc(); }});
+      const save=document.createElement('button'); save.className='mini'; save.textContent='save';
+      save.onclick=()=>finishEdit(l.id, field.latex());
+      const cancel=document.createElement('button'); cancel.className='mini'; cancel.textContent='cancel';
+      cancel.onclick=()=>{ editingId=null; renderDoc(); };
+      tools.innerHTML=''; tools.append(save,cancel); tools.style.opacity=1;
+    } else {
+      try{ katex.render(l.latex, mc, {throwOnError:false}); }
+      catch(e){ mc.textContent = l.latex; }
+      mc.onclick = ()=> startEdit(l.id);
+      mc.onkeydown = e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); startEdit(l.id);} };
+      tools.querySelector('[data-act=edit]').onclick = e=>{ e.stopPropagation(); startEdit(l.id); };
+      tools.querySelector('[data-act=del]').onclick = e=>{
+        e.stopPropagation();
+        applyAction({action:'delete', target_id:l.id, source:'keyboard'});
+      };
+    }
+  }
+  renderPending();
+}
+
+function renderPending(){
+  const slot = document.getElementById('pendingslot');
+  slot.innerHTML='';
+  if(!pending) return;
+  const box = document.createElement('div'); box.id='pending';
+  const tag = document.createElement('span'); tag.className='ptag';
+  tag.textContent = pending.kind==='append' ? 'pending · new line'
+                  : pending.kind==='replace' ? `pending · replace [${pending.target}]`
+                  : `pending · insert after [${pending.after}]`;
+  const pm = document.createElement('div'); pm.className='pmath';
+  try{ katex.render(pending.latex, pm, {throwOnError:false}); }catch(e){ pm.textContent=pending.latex; }
+  const row = document.createElement('div');
+  const c=document.createElement('button'); c.className='primary'; c.textContent='Commit';
+  c.onclick=commitPending;
+  const s=document.createElement('button'); s.className='warn'; s.textContent='Scratch that'; s.style.marginLeft='6px';
+  s.onclick=scratchPending;
+  row.append(c,s);
+  box.append(tag,pm,row);
+  slot.appendChild(box);
+}
+
+function escapeHtml(s){ return s.replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+
+// ---------- edit flow ----------
+function startEdit(id){ editingId=id; renderDoc(); }
+function finishEdit(id, latex){
+  editingId=null;
+  const line = lines.find(l=>l.id===id);
+  if(line && latex.trim() && latex!==line.latex){
+    applyAction({action:'replace', target_id:id, latex:latex.trim(), source:'keyboard'});
+  } else renderDoc();
+}
+
+// ---------- actions ----------
+function applyAction(a){
+  snapshot();
+  if(a.action==='append_math'){
+    const id='e'+(nextId++); lines.push({id, latex:a.latex, label:null}); a.assigned_id=id;
+  } else if(a.action==='replace'){
+    const l=lines.find(x=>x.id===a.target_id); if(!l){ log(a,'discarded','unknown target'); undoStack.pop(); return; }
+    l.latex=a.latex;
+  } else if(a.action==='insert'){
+    const i=lines.findIndex(x=>x.id===a.after_id); if(i<0){ log(a,'discarded','unknown target'); undoStack.pop(); return; }
+    const id='e'+(nextId++); lines.splice(i+1,0,{id, latex:a.latex, label:null}); a.assigned_id=id;
+  } else if(a.action==='delete'){
+    const i=lines.findIndex(x=>x.id===a.target_id); if(i<0){ log(a,'discarded','unknown target'); undoStack.pop(); return; }
+    lines.splice(i,1);
+  } else if(a.action==='set_label'){
+    const l=lines.find(x=>x.id===a.target_id); if(!l){ log(a,'discarded','unknown target'); undoStack.pop(); return; }
+    l.label=a.text;
+  }
+  log(a,'committed');
+  renderDoc();
+}
+
+function commitPending(){
+  if(!pending) return;
+  const p=pending; pending=null;
+  if(p.kind==='append') applyAction({action:'append_math', latex:p.latex, source:p.source});
+  else if(p.kind==='replace') applyAction({action:'replace', target_id:p.target, latex:p.latex, source:p.source});
+  else applyAction({action:'insert', after_id:p.after, latex:p.latex, source:p.source});
+}
+function scratchPending(){
+  if(!pending) return;
+  log({action: pending.kind==='append'?'append_math':pending.kind, latex:pending.latex, source:pending.source},'discarded','scratched by voice/user');
+  pending=null; renderPending();
+}
+function undo(){
+  if(editingId){ editingId=null; renderDoc(); return; }
+  if(pending){ scratchPending(); return; }
+  if(!undoStack.length){ log({action:'undo'},'info','nothing to undo'); return; }
+  lines = undoStack.pop();
+  log({action:'undo', source:'voice/keyboard'},'committed');
+  renderDoc();
+}
+
+// ---------- console ----------
+function log(a, status, note){
+  const el=document.createElement('div');
+  el.className='logentry '+status;
+  const ctx = docContext();
+  el.innerHTML = `<span class="st">${status}${note?' · '+escapeHtml(note):''}</span>`+
+    escapeHtml(JSON.stringify(a)) +
+    (status==='committed' && ctx ? `\n<span style="color:var(--ink-soft)">doc: ${escapeHtml(ctx.length>110?ctx.slice(0,110)+'…':ctx)}</span>`:'');
+  const logEl=document.getElementById('log');
+  logEl.prepend(el);
+  while(logEl.children.length>40) logEl.lastChild.remove();
+}
+
+// ---------- stand-in "engine": transcript router + toy spoken→LaTeX ----------
+// In production: audio → Whisper transcript → (command? edit-op LLM : Qwen post-correction) → Action
+function looksLikeLatex(s){ return /[\\^_{}]/.test(s); }
+
+const PHRASES = [
+  [/^e equals m c squared$/i, 'E = mc^2'],
+  [/^one half m v squared$/i, '\\frac{1}{2}mv^2'],
+  [/^the integral from zero to infinity of e to the minus x d x$/i, '\\int_0^{\\infty} e^{-x}\\,dx'],
+];
+
+function spokenToLatex(s){
+  s=s.trim();
+  if(looksLikeLatex(s)) return s;
+  for(const [re,tex] of PHRASES){ if(re.test(s)) return tex; }
+  // crude rule fallback — stand-in for the Qwen2.5 post-correction stage
+  let t=' '+s.toLowerCase()+' ';
+  t=t.replace(/ square root of ([a-z0-9 +\-]+?)( |$)/g,' \\sqrt{$1} ');
+  t=t.replace(/([a-z0-9]) squared/g,'$1^2').replace(/([a-z0-9]) cubed/g,'$1^3');
+  t=t.replace(/ to the power of (\w+)/g,'^{$1}');
+  t=t.replace(/\b(alpha|beta|gamma|delta|theta|lambda|mu|pi|sigma|phi|omega)\b/g,'\\$1');
+  t=t.replace(/ plus /g,' + ').replace(/ minus /g,' - ').replace(/ times /g,' \\cdot ').replace(/ equals /g,' = ');
+  const ov=t.split(' over ');
+  if(ov.length===2) t=`\\frac{${ov[0].trim()}}{${ov[1].trim()}}`;
+  return t.trim().replace(/\s+/g,' ');
+}
+
+function routeUtterance(raw){
+  const s=raw.trim(); if(!s) return;
+  const low=s.toLowerCase();
+  // app-layer intents (openWakeWord territory)
+  if(low==='commit'){ commitPending(); return; }
+  if(low==='scratch that'||low==='scratch'){ scratchPending(); return; }
+  if(low==='undo'){ undo(); return; }
+  // command grammar (transcript-classified in the real router)
+  let m;
+  if(m=low.match(/^(?:delete|remove)\s+(?:line\s+)?(e\d+)$/)){ applyAction({action:'delete', target_id:m[1], source:'voice'}); return; }
+  if(m=s.match(/^label\s+(e\d+)\s+(.+)$/i)){ applyAction({action:'set_label', target_id:m[1].toLowerCase(), text:m[2].trim(), source:'voice'}); return; }
+  if(m=s.match(/^(?:change|replace)\s+(e\d+)\s+to\s+(.+)$/i)){
+    if(pending) commitPending();
+    pending={kind:'replace', target:m[1].toLowerCase(), latex:spokenToLatex(m[2]), source:'voice'};
+    log({action:'replace', target_id:pending.target, latex:pending.latex, source:'voice'},'pending'); renderPending(); return;
+  }
+  if(m=s.match(/^insert\s+after\s+(e\d+)\s+(.+)$/i)){
+    if(pending) commitPending();
+    pending={kind:'insert', after:m[1].toLowerCase(), latex:spokenToLatex(m[2]), source:'voice'};
+    log({action:'insert', after_id:pending.after, latex:pending.latex, source:'voice'},'pending'); renderPending(); return;
+  }
+  // default: dictation → append (auto-commits any prior pending line, like continuous dictation)
+  if(pending) commitPending();
+  pending={kind:'append', latex:spokenToLatex(s), source:'voice'};
+  log({action:'append_math', latex:pending.latex, source:'voice'},'pending');
+  renderPending();
+}
+
+// ---------- wiring ----------
+document.getElementById('send').onclick=()=>{ const i=document.getElementById('utterance'); routeUtterance(i.value); i.value=''; i.focus(); };
+document.getElementById('utterance').addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); document.getElementById('send').click(); }});
+document.getElementById('commitbtn').onclick=commitPending;
+document.getElementById('scratchbtn').onclick=scratchPending;
+document.getElementById('undobtn').onclick=undo;
+document.querySelectorAll('.chip').forEach(b=> b.onclick=()=>{ document.getElementById('utterance').value=b.dataset.say; document.getElementById('send').click(); });
+document.getElementById('addline').onclick=()=>{
+  snapshot();
+  const id='e'+(nextId++);
+  lines.push({id, latex:'', label:null});
+  log({action:'append_math', latex:'', source:'keyboard', assigned_id:id},'committed','typed line opened');
+  editingId=id; renderDoc();
+};
+document.addEventListener('keydown', e=>{
+  if(e.ctrlKey && e.key==='Enter'){ commitPending(); }
+  if(e.ctrlKey && e.key.toLowerCase()==='z' && document.activeElement.tagName!=='INPUT' && !editingId){ e.preventDefault(); undo(); }
+});
+
+// seed document so edit commands have targets
+lines=[{id:'e1',latex:'\\frac{1}{2}mv^2',label:null},{id:'e2',latex:'E = mc^2',label:null}]; nextId=3;
+log({action:'session_start', engine:'whisper-qwen-s2l', doc_seed:['e1','e2']},'info');
+renderDoc();
+</script>
+</body>
+</html>
