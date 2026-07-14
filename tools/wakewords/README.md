@@ -17,33 +17,14 @@ Runtime lives in `src/scribe/audio/wakewords.py`; the server auto-loads
    python tools/wakewords/generate_samples.py --phrase "scratch that" --n 4000
    ```
 
-   piper-sample-generator is Linux-oriented (espeak-ng phonemization); if it
-   fights you on Windows, run this step in WSL or Colab.
+   piper-sample-generator is Linux-oriented (espeak-ng phonemization); run
+   this step in WSL or Colab.
 
-   ### WSL2 setup gotchas (learned the hard way, 2026-07; env lives in
-   `~/gemmapollo-ww` on the Ubuntu distro)
-
-   - Use a **python 3.10** venv (the notebook's pins predate 3.12).
-   - `webrtcvad` needs a C compiler → install **`webrtcvad-wheels`** instead
-     (same module, prebuilt).
-   - `datasets==2.14.6` needs **`pyarrow==13`** and **`numpy<2`**.
-   - `pronouncing` needs `pkg_resources` → **`setuptools<81`**.
-   - torch/torchaudio must be the **same release pair** from the same index
-     (mismatched wheels fail loading `_torchaudio.abi3.so`); latest
-     `torch-audiomentations` (0.11 uses a removed torchaudio API).
-   - No sudo needed for espeak-ng: `pip install espeak-phonemizer
-     espeakng-loader`, then symlink `espeakng_loader`'s `libespeak-ng.so` as
-     `libespeak-ng.so.1` on `LD_LIBRARY_PATH`.
-   - train.py wants **dscripka's fork** of piper-sample-generator (top-level
-     `generate_samples.py`) and its **v1** checkpoint
-     `en-us-libritts-high.pt` (release v1.0.0), NOT rhasspy v2's
-     `en_US-libritts_r-medium.pt`; patch its `torch.load(...)` to
-     `weights_only=False` for torch ≥2.6.
-   - `os.mkdir(output_dir)` in train.py: create the parent dir first.
-   - AudioSet on HF (`agkphysics/AudioSet`) is parquet shards now — decode
-     with pyarrow+soundfile; old `datasets` can't parse the repo metadata.
-   - The ACAV features file is 17.28 GB (`Content-Length` check it — a
-     collided/resumed download can silently corrupt it).
+   **✅ Done 2026-07-15, locally in WSL2** — the working, fully-patched
+   pipeline is versioned in [`wsl/`](wsl/) (`setup.sh` → `data.sh` →
+   `train.sh "<phrase>"`), and the complete runbook — results, recipe,
+   deployment, and a table of every dependency landmine plus its fix — is
+   [`docs/wakeword-training.md`](../../docs/wakeword-training.md).
 
 2. **Negatives — recorded math dictation.** The spotters listen while you
    dictate equations, so dictation audio is the adversarial negative set:
