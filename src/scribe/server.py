@@ -89,17 +89,72 @@ def build_app(engine_name: str = "mock", mic: bool = False,
                          "assigned_id": assigned,
                          "doc_context": doc.render_context()})
 
+    # ---------------------------------------------------- pending composition
+    # A pending append_math proposal is a COMPOSITION: further dictation
+    # extends it (transcripts re-corrected as one equation) until the user
+    # commits or scratches. This is the app-layer system that lets
+    # non-agentic engines (S2L) build long equations without edit-op tools.
+    # segments: [{"text": str, "audio": np.ndarray|None}]
+
+    def composed_wav(p) -> bytes | None:
+        chunks = [s["audio"] for s in p["segments"] if s.get("audio") is not None]
+        if not chunks:
+            return None
+        import numpy as np
+
+        from .audio.vad import wav_bytes
+        return wav_bytes(np.concatenate(chunks))
+
+    def joined_text(p) -> str:
+        return " ".join(s["text"] for s in p["segments"] if s["text"])
+
+    async def broadcast_proposal(pid: str):
+        p = pending[pid]
+        await broadcast({"type": "proposal", "pending_id": pid,
+                         "action": p["action"].model_dump(),
+                         "transcript": p["transcript"],
+                         "segments": len(p["segments"])})
+
+    async def remerge(p):
+        """Re-run the engine's text path on the joined transcript so the
+        post-corrector sees the whole equation, not glued fragments."""
+        joined = joined_text(p)
+        merged = await asyncio.to_thread(engine.process_text, joined,
+                                         doc.render_context())
+        if merged.action.action == "append_math":
+            p["action"] = merged.action
+        # else: joined text suddenly parses as a command — keep previous latex
+        p["transcript"] = joined
+
     async def resolve_pending(pending_id: str, verdict: str):
         """Commit or scratch a pending proposal. Shared by `resolve` frames and
-        `commit`/`scratch` intents (buttons now, voice spotters in Phase 5)."""
-        p = pending.pop(pending_id, None)
+        `commit`/`scratch` intents (buttons now, voice spotters in Phase 5).
+        Scratch pops the last composition segment first; the whole pending is
+        discarded only when a single segment remains."""
+        p = pending.get(pending_id)
         if not p:
             return
         if verdict == "commit":
+            pending.pop(pending_id)
             await apply_and_broadcast(p["action"], "committed",
-                                      p["transcript"], p["audio_wav"])
+                                      p["transcript"], composed_wav(p))
+            return
+        if len(p["segments"]) > 1:
+            popped = p["segments"].pop()
+            audio_wav = None
+            if popped.get("audio") is not None:
+                from .audio.vad import wav_bytes
+                audio_wav = wav_bytes(popped["audio"])
+            logger.log(audio_bytes=audio_wav, doc_context=doc.render_context(),
+                       transcript=popped["text"],
+                       engine_action=p["action"].model_dump(),
+                       final_action=None, verdict="scratched",
+                       engine=engine.name, latency_ms={})
+            await remerge(p)
+            await broadcast_proposal(pending_id)
         else:
-            logger.log(audio_bytes=p["audio_wav"],
+            pending.pop(pending_id)
+            logger.log(audio_bytes=composed_wav(p),
                        doc_context=doc.render_context(),
                        transcript=p["transcript"],
                        engine_action=p["action"].model_dump(),
@@ -109,37 +164,52 @@ def build_app(engine_name: str = "mock", mic: bool = False,
                              "detail": "scratched"})
 
     # ------------------------------------------------------------ utterances
+    def engine_context() -> str:
+        """Doc context for the engine. A pending append is shown under the id
+        it WILL get on commit, so voice commands can target it (auto-commit
+        assigns exactly that id before the command applies)."""
+        ctx = doc.render_context()
+        for p in pending.values():
+            if p["action"].action == "append_math":
+                entry = f"[{doc.peek_next_id()}] {p['action'].latex}"
+                ctx = f"{ctx}  {entry}" if ctx else entry
+        return ctx
+
     async def process_utterance(text: str | None = None, audio=None):
         """Shared pipeline for typed utterances (ws text box) and mic
         utterances (VAD chunker). Engine inference runs off the event loop."""
         await broadcast({"type": "status", "state": "thinking"})
         if audio is not None:
             res = await asyncio.to_thread(engine.process, audio,
-                                          doc.render_context())
+                                          engine_context())
         else:
             res = await asyncio.to_thread(engine.process_text, text,
-                                          doc.render_context())
+                                          engine_context())
         if res.transcript:
             await broadcast({"type": "transcript", "text": res.transcript,
                              "interim": False})
         a = res.action
+        segment = {"text": res.transcript or text or "", "audio": audio}
+        composing = next((pid for pid, p in pending.items()
+                          if p["action"].action == "append_math"), None)
         if isinstance(a, (TextReply, Clarify)):
             await broadcast({"type": "reply", **a.model_dump()})
+        elif a.action == "append_math" and composing is not None:
+            # extend the pending equation instead of starting a new line
+            p = pending[composing]
+            p["segments"].append(segment)
+            await remerge(p)
+            await broadcast_proposal(composing)
         else:
-            # auto-commit any prior pending (continuous dictation)
+            # commands auto-commit whatever is pending (they end composition);
+            # a fresh append starts a new composition after the same flush
             for pid in list(pending):
                 await resolve_pending(pid, "commit")
             counter["n"] += 1
             pid = f"p{counter['n']}"
-            audio_wav = None
-            if audio is not None:
-                from .audio.vad import wav_bytes
-                audio_wav = wav_bytes(audio)
-            pending[pid] = {"action": a, "transcript": res.transcript,
-                            "audio_wav": audio_wav}
-            await broadcast({"type": "proposal", "pending_id": pid,
-                             "action": a.model_dump(),
-                             "transcript": res.transcript})
+            pending[pid] = {"action": a, "transcript": segment["text"],
+                            "segments": [segment]}
+            await broadcast_proposal(pid)
         await broadcast({"type": "status",
                          "state": "listening" if mic else "idle"})
 

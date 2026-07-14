@@ -205,8 +205,9 @@
   </div>
   <div class="hint">
     In the real app this input is your microphone: VAD-chunked utterances go to the engine; “commit / scratch that / undo”
-    are openWakeWord spotters handled instantly by the app. Raw LaTeX is accepted here as a stand-in for the
-    speech→LaTeX stage. Click any committed line to edit it with MathQuill (Enter saves, Esc cancels).
+    are openWakeWord spotters handled instantly by the app. Dictation <em>extends</em> the pending equation piece by piece —
+    say “commit” to finish the line, “scratch that” to remove the last piece. Raw LaTeX is accepted here as a stand-in for
+    the speech→LaTeX stage. Click any committed line to edit it with MathQuill (Enter saves, Esc cancels).
   </div>
 </div>
 
@@ -284,7 +285,8 @@ function applyServerDoc(ctx, action){
 
 function serverProposalToPending(msg){
   const a = msg.action;
-  const p = {pending_id: msg.pending_id, transcript: msg.transcript, action: a, latex:null};
+  const p = {pending_id: msg.pending_id, transcript: msg.transcript, action: a, latex:null,
+             segments: msg.segments || 1};
   if(a.action==='append_math'){ p.tag='new line'; p.latex=a.latex; }
   else if(a.action==='replace'){ p.tag=`replace [${a.target_id}]`; p.latex=a.latex; }
   else if(a.action==='insert'){ p.tag=`insert after [${a.after_id}]`; p.latex=a.latex; }
@@ -459,7 +461,8 @@ function renderPending(){
                   : pending.kind==='append' ? 'new line'
                   : pending.kind==='replace' ? `replace [${pending.target}]`
                   : `insert after [${pending.after}]`;
-  tag.textContent = 'pending · ' + tagtext;
+  const nseg = pending.segments && pending.segments.length ? pending.segments.length : pending.segments;
+  tag.textContent = 'pending · ' + tagtext + (nseg > 1 ? ` · ${nseg} utterances` : '');
   const pm = document.createElement('div'); pm.className='pmath';
   if(pending.latex){
     try{ katex.render(pending.latex, pm, {throwOnError:false}); }catch(e){ pm.textContent=pending.latex; }
@@ -532,11 +535,25 @@ function commitPending(){
 function scratchPending(){
   if(!pending) return;
   if(wsMode){
-    // Clear optimistically: the server pops the pending unconditionally and
-    // only replies with a status frame, so there is nothing to wait for.
     wsSend({type:'resolve', pending_id:pending.pending_id, verdict:'scratch'});
-    log(pending.action||{action:'scratch'},'discarded','scratched');
-    pending=null; renderPending();
+    if((pending.segments||1) > 1){
+      // composition: the server pops one segment and re-broadcasts the
+      // proposal — keep the strip up and let that frame refresh it
+      log({action:'scratch_segment'},'discarded','popped last utterance');
+    } else {
+      // single segment: server discards and only replies with a status
+      // frame, so clear optimistically
+      log(pending.action||{action:'scratch'},'discarded','scratched');
+      pending=null; renderPending();
+    }
+    return;
+  }
+  // local composition parity: pop the last spoken segment first
+  if(pending.kind==='append' && pending.segments && pending.segments.length > 1){
+    pending.segments.pop();
+    pending.latex = spokenToLatex(pending.segments.join(' '));
+    log({action:'scratch_segment', latex:pending.latex},'discarded','popped last utterance');
+    renderPending();
     return;
   }
   log({action: pending.kind==='append'?'append_math':pending.kind, latex:pending.latex, source:pending.source},'discarded','scratched by voice/user');
@@ -625,9 +642,18 @@ function routeUtterance(raw){
     pending={kind:'insert', after:m[1].toLowerCase(), latex:spokenToLatex(m[2]), source:'voice'};
     log({action:'insert', after_id:pending.after, latex:pending.latex, source:'voice'},'pending'); renderPending(); return;
   }
-  // default: dictation → append (auto-commits any prior pending line, like continuous dictation)
+  // default: dictation. A pending append is a COMPOSITION — new dictation
+  // extends the equation (re-converted from the joined spoken text) until
+  // "commit" / "scratch that". Command pendings auto-commit as before.
+  if(pending && pending.kind==='append' && pending.segments){
+    pending.segments.push(s);
+    pending.latex = spokenToLatex(pending.segments.join(' '));
+    log({action:'append_math', latex:pending.latex, segments:pending.segments.length, source:'voice'},'pending');
+    renderPending();
+    return;
+  }
   if(pending) commitPending();
-  pending={kind:'append', latex:spokenToLatex(s), source:'voice'};
+  pending={kind:'append', latex:spokenToLatex(s), segments:[s], source:'voice'};
   log({action:'append_math', latex:pending.latex, source:'voice'},'pending');
   renderPending();
 }

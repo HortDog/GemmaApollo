@@ -180,6 +180,96 @@ def test_mic_frames_with_stubbed_supervisor():
         _drain_until(ws, "mics")
 
 
+def test_composition_merges_dictation_into_pending():
+    client = TestClient(build_app("mock"))
+    with client.websocket_connect("/ws") as ws:
+        _drain_until(ws, "status")
+        ws.send_json({"type": "utterance", "text": "one half m v squared"})
+        p1 = _drain_until(ws, "proposal")
+        assert p1["action"]["latex"] == "\\frac{1}{2}mv^2"
+        assert p1["segments"] == 1
+
+        ws.send_json({"type": "utterance", "text": "plus m g h"})
+        p2 = _drain_until(ws, "proposal")
+        assert p2["pending_id"] == p1["pending_id"]      # same proposal, extended
+        assert p2["segments"] == 2
+        assert p2["transcript"] == "one half m v squared plus m g h"
+        # merged latex comes from re-converting the JOINED transcript
+        assert p2["action"]["latex"] == "one half m v^2 + m g h"
+
+
+def test_scratch_pops_last_segment_then_discards():
+    client = TestClient(build_app("mock"))
+    with client.websocket_connect("/ws") as ws:
+        _drain_until(ws, "status")
+        ws.send_json({"type": "utterance", "text": "one half m v squared"})
+        p1 = _drain_until(ws, "proposal")
+        ws.send_json({"type": "utterance", "text": "plus m g h"})
+        _drain_until(ws, "proposal")
+
+        ws.send_json({"type": "intent", "name": "scratch"})
+        p3 = _drain_until(ws, "proposal")                 # reverted, not discarded
+        assert p3["pending_id"] == p1["pending_id"]
+        assert p3["segments"] == 1
+        assert p3["action"]["latex"] == "\\frac{1}{2}mv^2"
+
+        ws.send_json({"type": "intent", "name": "scratch"})
+        _drain_until(ws, "status", detail="scratched")    # now fully discarded
+        ws.send_json({"type": "utterance", "text": "y"})
+        p4 = _drain_until(ws, "proposal")
+        assert p4["segments"] == 1                        # fresh composition
+
+
+def test_command_ends_composition_via_auto_commit():
+    client = TestClient(build_app("mock"))
+    with client.websocket_connect("/ws") as ws:
+        _drain_until(ws, "status")
+        ws.send_json({"type": "utterance", "text": "a"})
+        _drain_until(ws, "proposal")
+        ws.send_json({"type": "utterance", "text": "b"})
+        _drain_until(ws, "proposal")
+        ws.send_json({"type": "utterance", "text": "change the last line to z"})
+        applied = _drain_until(ws, "applied")             # composition committed
+        assert applied["doc_context"] == "[e1] a b"
+        prop = _drain_until(ws, "proposal")               # then the command
+        assert prop["action"]["action"] == "replace"
+        assert prop["action"]["target_id"] == "e1"
+
+
+def test_commit_logs_joined_transcript(tmp_path):
+    import json as _json
+    from pathlib import Path
+    client = TestClient(build_app("mock"))
+    with client.websocket_connect("/ws") as ws:
+        _drain_until(ws, "status")
+        ws.send_json({"type": "utterance", "text": "a"})
+        _drain_until(ws, "proposal")
+        ws.send_json({"type": "utterance", "text": "b"})
+        p = _drain_until(ws, "proposal")
+        ws.send_json({"type": "resolve",
+                      "pending_id": p["pending_id"], "verdict": "commit"})
+        applied = _drain_until(ws, "applied")
+        assert applied["doc_context"] == "[e1] a b"
+    session = next(Path("data/sessions").iterdir())      # conftest chdir'd to tmp
+    recs = [_json.loads(f.read_text()) for f in sorted(session.glob("*.json"))]
+    committed = [r for r in recs if r["verdict"] == "committed"]
+    assert committed and committed[-1]["transcript"] == "a b"
+
+
+def test_clarify_leaves_composition_intact():
+    client = TestClient(build_app("mock"))
+    with client.websocket_connect("/ws") as ws:
+        _drain_until(ws, "status")
+        ws.send_json({"type": "utterance", "text": "a"})
+        p1 = _drain_until(ws, "proposal")
+        # out-of-range ordinal -> Clarify (reply), composition untouched
+        ws.send_json({"type": "utterance", "text": "delete line nine"})
+        _drain_until(ws, "reply")
+        ws.send_json({"type": "utterance", "text": "b"})
+        p2 = _drain_until(ws, "proposal")
+        assert p2["pending_id"] == p1["pending_id"] and p2["segments"] == 2
+
+
 def test_undo_after_commit():
     client = TestClient(build_app("mock"))
     with client.websocket_connect("/ws") as ws:

@@ -85,6 +85,12 @@ class DocState:
     def render_context(self) -> str:
         return "  ".join(f"[{l.id}] {l.latex}" for l in self.lines)
 
+    def peek_next_id(self) -> str:
+        """The id the next append/insert will be assigned. Lets the server
+        show a pending (uncommitted) line to the engine under its future id,
+        so voice commands can target it."""
+        return f"e{self._next}"
+
     def _snapshot(self):
         self._undo.append(copy.deepcopy(self.lines))
         if len(self._undo) > self.UNDO_DEPTH:

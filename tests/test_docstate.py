@@ -51,6 +51,15 @@ def test_undo_after_delete_restores_id_ordering():
     assert [l.id for l in d.lines] == ["e1", "e2", "e3"]
     assert [l.latex for l in d.lines] == ["a", "b", "c"]
 
+def test_peek_next_id_matches_assignment():
+    d = DocState()
+    assert d.peek_next_id() == "e1"
+    assert d.apply(AppendMath(latex="x")) == "e1"
+    assert d.peek_next_id() == "e2"
+    d.apply(Delete(target_id="e1"))
+    assert d.peek_next_id() == "e2"     # ids are never reused
+
+
 def test_parse_ordinal():
     assert parse_ordinal("line two") == 1
     assert parse_ordinal("line 2") == 1
