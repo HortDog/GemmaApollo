@@ -6,6 +6,8 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("serve"); s.add_argument("--engine", default="mock",
         choices=["mock", "s2l", "gemma"]); s.add_argument("--port", type=int, default=8017)
+    s.add_argument("--mic", action="store_true",
+                   help="backend owns the microphone: VAD-chunked utterances feed the engine")
     b = sub.add_parser("bench"); b.add_argument("--engine", default="s2l",
         choices=["mock", "s2l"]); b.add_argument("--asr-model", default=None,
         help="override whisper model: large-v3 | large-v3-turbo | distil-large-v3")
@@ -15,7 +17,8 @@ def main():
     if args.cmd == "serve":
         import uvicorn
         from .server import build_app
-        uvicorn.run(build_app(engine_name=args.engine), host="127.0.0.1", port=args.port)
+        uvicorn.run(build_app(engine_name=args.engine, mic=args.mic),
+                    host="127.0.0.1", port=args.port)
     elif args.cmd == "bench":
         from .bench import print_summary, run_bench
         print_summary(run_bench(args.engine, asr_model=args.asr_model))

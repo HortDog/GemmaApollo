@@ -143,6 +143,7 @@
   <h1>GemmaApollo Scribe</h1>
   <span class="sub">ui prototype · line-by-line · voice + MathQuill</span>
   <span id="netstatus" class="sub" title="WebSocket link to the scribe server">○ local mode</span>
+  <span id="vstate" class="sub" title="Voice pipeline state (listening / heard / thinking / idle)"></span>
   <div class="engine" title="Both engines must emit the same Action objects. Engine switcher lands in Phase 8.">
     engine <span id="engname">local toy router</span>
   </div>
@@ -211,6 +212,19 @@ let ws = null;
 let wsMode = false;
 let startEditOnApply = false;   // set when a keyboard "+ typed line" awaits its id
 
+const VSTATE_STYLE = {
+  listening: ['● listening', 'var(--commit)'],
+  heard:     ['◑ heard',     'var(--pending)'],
+  thinking:  ['◌ thinking…', 'var(--pending)'],
+  idle:      ['○ idle',      'var(--ink-soft)'],
+};
+function setVoiceState(state, detail){
+  const el = document.getElementById('vstate');
+  const [txt, color] = VSTATE_STYLE[state] || ['○ ' + state, 'var(--ink-soft)'];
+  el.textContent = txt + (detail && !detail.startsWith('engine=') ? ' · ' + detail : '');
+  el.style.color = color;
+}
+
 function setNet(connected){
   wsMode = connected;
   const el = document.getElementById('netstatus');
@@ -268,8 +282,10 @@ function handleServerFrame(msg){
       if(msg.detail && msg.detail.startsWith('engine=')){
         document.getElementById('engname').textContent = msg.detail.slice(7) + ' (server)';
       }
+      setVoiceState(msg.state, msg.detail);
       break;
     case 'transcript':
+      setVoiceState('heard', msg.text);
       log({action:'transcript', text:msg.text, interim:msg.interim}, 'info');
       break;
     case 'proposal':
@@ -314,6 +330,7 @@ function connectWs(){
   ws.onclose = ()=>{
     setNet(false);
     document.getElementById('engname').textContent = 'local toy router';
+    document.getElementById('vstate').textContent = '';
     log({action:'ws_closed', note:'local fallback'}, 'info');
   };
   ws.onerror = ()=>{ setNet(false); };

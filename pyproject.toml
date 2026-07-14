@@ -8,6 +8,7 @@ dependencies = [
   "uvicorn[standard]>=0.29",
   "pydantic>=2.6",
   "websockets>=12",
+  "numpy>=1.26",  # audio arrays are a wire type (chunker, wav encode) — keep pure-logic testable
 ]
 
 [project.optional-dependencies]
@@ -20,10 +21,9 @@ s2l = [
   "torch>=2.7",
 ]
 audio = [
-  # Phase 4/5
-  "sounddevice",
-  "silero-vad",
-  "openwakeword",
+  # Phase 4 (openwakeword joins in Phase 5)
+  "sounddevice>=0.5",
+  "silero-vad>=5.1",
 ]
 eval = ["sympy", "jiwer"]
 dev = ["pytest>=8", "httpx>=0.27"]  # httpx: starlette TestClient ws round-trip tests

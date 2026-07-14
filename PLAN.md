@@ -57,18 +57,26 @@ next phase until they pass. Pure-logic phases (1, 2) need no GPU.
   Real CER comparison = run the reference eval on the marsianin500/Speech2Latex
   HF test split, which is exactly Phase 7's eval harness. ⚠ carried forward.
 
-## Phase 4 — Live audio: VAD + mic streaming
-- [ ] `audio/vad.py`: Silero VAD chunker on a 16 kHz mic stream
-      (sounddevice), emitting utterance wavs with configurable
-      min/max length (0.5–10 s) and padding.
-- [ ] Browser sends mic audio over ws (Opus/PCM frames) OR backend owns the
-      mic directly (simpler, single-user local app — prefer backend mic,
-      keep browser-mic as a stretch goal).
-- [ ] Status frames drive UI states: listening / heard (interim transcript) /
-      thinking / action.
-- **Accept:** speak "e equals m c squared" into the mic → pending line within
-  ~2 s; interim transcript visible; silence produces no spurious utterances
-  over a 60 s idle test.
+## Phase 4 — Live audio: VAD + mic streaming ✅ (final spoken test = user)
+- [x] `audio/vad.py`: Silero VAD chunker on a 16 kHz mic stream
+      (sounddevice), emitting utterance arrays with configurable
+      min/max length (0.5–10 s) and pre-roll padding. Pure UtteranceChunker
+      (fake-VAD unit tests) + lazy SileroVAD/mic wrappers. min_s gates on
+      speech duration, not buffer length (clicks stay dropped).
+- [x] Backend owns the mic: `scribe serve --mic` runs mic→VAD→chunker in a
+      daemon thread feeding the same utterance pipeline as typed input;
+      engine inference runs off the event loop; all server frames broadcast
+      to every connected client. Mic utterance wavs attach to pending
+      proposals and land in the datalogger on commit/scratch.
+      (Browser-mic ws `audio` frames remain the stretch goal.)
+- [x] Status frames drive UI states: listening / heard / thinking / idle —
+      state chip in the frontend header.
+- **Accept:** verified with real Silero on fixtures: each clip → exactly 1
+  utterance (2.3–7.1 s), 0 spurious utterances over 60 s silence AND 60 s
+  low room noise; `--mic` serve announces `listening`, capture thread runs
+  clean, typed utterances still round-trip. ⚠ The literal speak-into-the-mic
+  check needs a human voice — run `uv run scribe serve --engine s2l --mic`
+  and say "e equals m c squared".
 
 ## Phase 5 — Wake-word spotters
 - [ ] `audio/wakewords.py`: openWakeWord models for commit / undo /

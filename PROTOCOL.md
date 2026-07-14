@@ -7,7 +7,7 @@ with this file.
 | type        | fields                          | meaning |
 |-------------|---------------------------------|---------|
 | `utterance` | `text`                          | simulated speech from the UI text box |
-| `audio`     | binary frame (16 kHz PCM s16le) | one VAD-chunked utterance (browser-mic mode; Phase 4 stretch) |
+| `audio`     | binary frame (16 kHz PCM s16le) | one VAD-chunked utterance (browser-mic mode; stretch goal — Phase 4 shipped the backend-owned mic instead: `scribe serve --mic`, no client frame involved) |
 | `intent`    | `name: commit\|undo\|scratch`   | UI button pressed (voice spotters are server-side) |
 | `edit`      | `action: <Action JSON>`         | keyboard-sourced edit (MathQuill save, delete button) |
 | `resolve`   | `pending_id, verdict: commit\|scratch` | resolve a pending proposal |
