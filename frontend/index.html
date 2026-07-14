@@ -39,9 +39,9 @@
     margin-left:auto; font-family:'IBM Plex Mono',monospace; font-size:.72rem;
     display:flex; align-items:center; gap:8px; color:var(--ink-soft);
   }
-  .engine select{
-    font-family:inherit; font-size:.72rem; padding:4px 6px;
-    border:1px solid var(--line); background:var(--card); color:var(--ink); border-radius:3px;
+  .engine #engname{
+    padding:4px 8px; border:1px solid var(--line); background:var(--card);
+    color:var(--ink); border-radius:3px;
   }
   main{
     flex:1; display:grid; grid-template-columns:minmax(0,1.55fr) minmax(280px,1fr);
@@ -142,12 +142,9 @@
 <header>
   <h1>GemmaApollo Scribe</h1>
   <span class="sub">ui prototype · line-by-line · voice + MathQuill</span>
-  <div class="engine">
-    <label for="engsel">engine</label>
-    <select id="engsel" title="Both engines must emit the same Action objects">
-      <option>Whisper-large-v3 → Qwen2.5 (S2L)</option>
-      <option>Gemma 4 12B (GemmaApollo)</option>
-    </select>
+  <span id="netstatus" class="sub" title="WebSocket link to the scribe server">○ local mode</span>
+  <div class="engine" title="Both engines must emit the same Action objects. Engine switcher lands in Phase 8.">
+    engine <span id="engname">local toy router</span>
   </div>
 </header>
 
@@ -206,6 +203,122 @@ let editingId = null;
 function snapshot(){ undoStack.push(JSON.parse(JSON.stringify(lines))); if(undoStack.length>50) undoStack.shift(); }
 function docContext(){ return lines.map(l=>`[${l.id}] ${l.latex}`).join('  '); }
 
+// ---------- networking (Phase 2) ----------
+// When a ws to the scribe server is open we defer to it: the server owns
+// DocState and every mutation comes back as an `applied` frame we re-render
+// from. With no ws we stay in the original local mode (offline fallback).
+let ws = null;
+let wsMode = false;
+let startEditOnApply = false;   // set when a keyboard "+ typed line" awaits its id
+
+function setNet(connected){
+  wsMode = connected;
+  const el = document.getElementById('netstatus');
+  el.textContent = connected ? '● server-driven' : '○ local mode';
+  el.style.color = connected ? 'var(--commit)' : 'var(--ink-soft)';
+}
+
+function wsSend(obj){ if(ws && ws.readyState===1) ws.send(JSON.stringify(obj)); }
+
+function parseDocContext(ctx){
+  // "[e1] latex  [e2] latex" -> [{id,latex}] (entries joined by two spaces)
+  const out = [];
+  if(!ctx || !ctx.trim()) return out;
+  const re = /\[(e\d+)\]\s([\s\S]*?)(?=\s\s\[e\d+\]|$)/g;
+  let m;
+  while(m = re.exec(ctx)){ out.push({id:m[1], latex:m[2].trim()}); }
+  return out;
+}
+
+function applyServerDoc(ctx, action){
+  // Rebuild the doc from the server's context string (source of truth). Labels
+  // aren't carried in doc_context, so preserve them by id and honour set_label.
+  const oldLabels = {};
+  for(const l of lines){ if(l.label) oldLabels[l.id] = l.label; }
+  lines = parseDocContext(ctx).map(x=>({id:x.id, latex:x.latex, label: oldLabels[x.id]||null}));
+  if(action && action.action==='set_label'){
+    const l = lines.find(x=>x.id===action.target_id); if(l) l.label = action.text;
+  }
+  // Keep the local id counter ahead of every server-assigned id, so a fall
+  // back to local mode after a disconnect can't mint duplicate ids.
+  for(const l of lines){
+    const n = parseInt(l.id.slice(1), 10);
+    if(n >= nextId) nextId = n + 1;
+  }
+  editingId = null;
+  renderDoc();
+}
+
+function serverProposalToPending(msg){
+  const a = msg.action;
+  const p = {pending_id: msg.pending_id, transcript: msg.transcript, action: a, latex:null};
+  if(a.action==='append_math'){ p.tag='new line'; p.latex=a.latex; }
+  else if(a.action==='replace'){ p.tag=`replace [${a.target_id}]`; p.latex=a.latex; }
+  else if(a.action==='insert'){ p.tag=`insert after [${a.after_id}]`; p.latex=a.latex; }
+  else if(a.action==='delete'){ p.tag=`delete [${a.target_id}]`; p.desc=`(remove line ${a.target_id})`; }
+  else if(a.action==='set_label'){ p.tag=`label [${a.target_id}]`; p.desc=`label → ${a.text}`; }
+  return p;
+}
+
+function handleServerFrame(msg){
+  switch(msg.type){
+    case 'status':
+      // Status frames drive the UI, not the Action log. The hello frame
+      // carries the active engine name (detail: "engine=<name>").
+      if(msg.detail && msg.detail.startsWith('engine=')){
+        document.getElementById('engname').textContent = msg.detail.slice(7) + ' (server)';
+      }
+      break;
+    case 'transcript':
+      log({action:'transcript', text:msg.text, interim:msg.interim}, 'info');
+      break;
+    case 'proposal':
+      pending = serverProposalToPending(msg);
+      log(msg.action, 'pending');
+      renderPending();
+      break;
+    case 'applied':
+      pending = null;
+      applyServerDoc(msg.doc_context, msg.action);
+      log(msg.action, 'committed');
+      // Open the editor only for our own "+ typed line" (empty append) — an
+      // auto-committed voice proposal racing the click must not steal it.
+      if(startEditOnApply && msg.assigned_id
+         && msg.action && msg.action.action==='append_math' && msg.action.latex===''){
+        startEditOnApply=false; startEdit(msg.assigned_id);
+      }
+      break;
+    case 'reply':
+      log(msg.question ? {action:'clarify', question:msg.question, candidates:msg.candidates}
+                       : {action:'text_reply', text:msg.text}, 'info');
+      break;
+    case 'error':
+      pending = null; renderPending();
+      log(msg.action||{action:'error'}, 'discarded', msg.message);
+      break;
+  }
+}
+
+function connectWs(){
+  try{
+    ws = new WebSocket(`ws://${location.host}/ws`);
+  }catch(e){ setNet(false); return; }
+  ws.onopen = ()=>{
+    setNet(true);
+    // The server owns DocState and starts empty; drop the local seed (and its
+    // undo history) so the UI mirrors server state. (No resync frame yet.)
+    lines = []; pending = null; editingId = null; undoStack = []; renderDoc();
+    log({action:'ws_connected', note:'server is source of truth'}, 'info');
+  };
+  ws.onmessage = ev=>{ try{ handleServerFrame(JSON.parse(ev.data)); }catch(e){} };
+  ws.onclose = ()=>{
+    setNet(false);
+    document.getElementById('engname').textContent = 'local toy router';
+    log({action:'ws_closed', note:'local fallback'}, 'info');
+  };
+  ws.onerror = ()=>{ setNet(false); };
+}
+
 // ---------- rendering ----------
 function renderDoc(){
   const doc = document.getElementById('doc');
@@ -252,7 +365,7 @@ function renderDoc(){
       tools.querySelector('[data-act=edit]').onclick = e=>{ e.stopPropagation(); startEdit(l.id); };
       tools.querySelector('[data-act=del]').onclick = e=>{
         e.stopPropagation();
-        applyAction({action:'delete', target_id:l.id, source:'keyboard'});
+        keyboardEdit({action:'delete', target_id:l.id, source:'keyboard'});
       };
     }
   }
@@ -265,11 +378,18 @@ function renderPending(){
   if(!pending) return;
   const box = document.createElement('div'); box.id='pending';
   const tag = document.createElement('span'); tag.className='ptag';
-  tag.textContent = pending.kind==='append' ? 'pending · new line'
-                  : pending.kind==='replace' ? `pending · replace [${pending.target}]`
-                  : `pending · insert after [${pending.after}]`;
+  const tagtext = pending.tag
+                  ? pending.tag
+                  : pending.kind==='append' ? 'new line'
+                  : pending.kind==='replace' ? `replace [${pending.target}]`
+                  : `insert after [${pending.after}]`;
+  tag.textContent = 'pending · ' + tagtext;
   const pm = document.createElement('div'); pm.className='pmath';
-  try{ katex.render(pending.latex, pm, {throwOnError:false}); }catch(e){ pm.textContent=pending.latex; }
+  if(pending.latex){
+    try{ katex.render(pending.latex, pm, {throwOnError:false}); }catch(e){ pm.textContent=pending.latex; }
+  } else {
+    pm.textContent = pending.desc || '';   // delete / set_label have no math to preview
+  }
   const row = document.createElement('div');
   const c=document.createElement('button'); c.className='primary'; c.textContent='Commit';
   c.onclick=commitPending;
@@ -288,11 +408,22 @@ function finishEdit(id, latex){
   editingId=null;
   const line = lines.find(l=>l.id===id);
   if(line && latex.trim() && latex!==line.latex){
-    applyAction({action:'replace', target_id:id, latex:latex.trim(), source:'keyboard'});
+    keyboardEdit({action:'replace', target_id:id, latex:latex.trim(), source:'keyboard'});
   } else renderDoc();
 }
 
 // ---------- actions ----------
+// Keyboard-sourced edits (MathQuill save, delete button, typed line): in
+// server mode they go as `edit` frames (applied immediately, committed);
+// locally they mutate directly.
+function keyboardEdit(a){
+  if(wsMode){
+    const {source, ...action} = a;   // `source` is UI-local, not part of the Action schema
+    wsSend({type:'edit', action});
+    return;
+  }
+  applyAction(a);
+}
 function applyAction(a){
   snapshot();
   if(a.action==='append_math'){
@@ -316,6 +447,7 @@ function applyAction(a){
 
 function commitPending(){
   if(!pending) return;
+  if(wsMode){ wsSend({type:'resolve', pending_id:pending.pending_id, verdict:'commit'}); return; }
   const p=pending; pending=null;
   if(p.kind==='append') applyAction({action:'append_math', latex:p.latex, source:p.source});
   else if(p.kind==='replace') applyAction({action:'replace', target_id:p.target, latex:p.latex, source:p.source});
@@ -323,11 +455,24 @@ function commitPending(){
 }
 function scratchPending(){
   if(!pending) return;
+  if(wsMode){
+    // Clear optimistically: the server pops the pending unconditionally and
+    // only replies with a status frame, so there is nothing to wait for.
+    wsSend({type:'resolve', pending_id:pending.pending_id, verdict:'scratch'});
+    log(pending.action||{action:'scratch'},'discarded','scratched');
+    pending=null; renderPending();
+    return;
+  }
   log({action: pending.kind==='append'?'append_math':pending.kind, latex:pending.latex, source:pending.source},'discarded','scratched by voice/user');
   pending=null; renderPending();
 }
 function undo(){
   if(editingId){ editingId=null; renderDoc(); return; }
+  if(wsMode){
+    if(pending){ scratchPending(); return; }   // scratch the live proposal first
+    wsSend({type:'intent', name:'undo'});
+    return;
+  }
   if(pending){ scratchPending(); return; }
   if(!undoStack.length){ log({action:'undo'},'info','nothing to undo'); return; }
   lines = undoStack.pop();
@@ -377,6 +522,15 @@ function spokenToLatex(s){
 function routeUtterance(raw){
   const s=raw.trim(); if(!s) return;
   const low=s.toLowerCase();
+  // server-driven mode: app intents become `intent` frames, everything else an
+  // `utterance` frame; the router lives on the server.
+  if(wsMode){
+    if(low==='commit'){ wsSend({type:'intent', name:'commit'}); return; }
+    if(low==='scratch that'||low==='scratch'){ wsSend({type:'intent', name:'scratch'}); return; }
+    if(low==='undo'){ wsSend({type:'intent', name:'undo'}); return; }
+    wsSend({type:'utterance', text:s});
+    return;
+  }
   // app-layer intents (openWakeWord territory)
   if(low==='commit'){ commitPending(); return; }
   if(low==='scratch that'||low==='scratch'){ scratchPending(); return; }
@@ -410,6 +564,11 @@ document.getElementById('scratchbtn').onclick=scratchPending;
 document.getElementById('undobtn').onclick=undo;
 document.querySelectorAll('.chip').forEach(b=> b.onclick=()=>{ document.getElementById('utterance').value=b.dataset.say; document.getElementById('send').click(); });
 document.getElementById('addline').onclick=()=>{
+  if(wsMode){
+    startEditOnApply = true;               // edit the new line once the server assigns its id
+    keyboardEdit({action:'append_math', latex:'', source:'keyboard'});
+    return;
+  }
   snapshot();
   const id='e'+(nextId++);
   lines.push({id, latex:'', label:null});
@@ -421,10 +580,14 @@ document.addEventListener('keydown', e=>{
   if(e.ctrlKey && e.key.toLowerCase()==='z' && document.activeElement.tagName!=='INPUT' && !editingId){ e.preventDefault(); undo(); }
 });
 
-// seed document so edit commands have targets
+// seed document so edit commands have targets (local mode). If a ws connects,
+// onopen clears this and the server becomes the source of truth.
 lines=[{id:'e1',latex:'\\frac{1}{2}mv^2',label:null},{id:'e2',latex:'E = mc^2',label:null}]; nextId=3;
 log({action:'session_start', engine:'whisper-qwen-s2l', doc_seed:['e1','e2']},'info');
 renderDoc();
+
+// Attempt to attach to the scribe server; on any failure we stay in local mode.
+connectWs();
 </script>
 </body>
 </html>

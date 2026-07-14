@@ -2,8 +2,8 @@
 Mirrors the converter in frontend/index.html so behavior matches local mode."""
 from __future__ import annotations
 import re, time
-from .base import EngineResult, TextReply
-from ..router import route
+from .base import Clarify, EngineResult, TextReply
+from ..router import route, resolver_from_context
 
 _PHRASES = [
     (re.compile(r"^e equals m c squared$", re.I), r"E = mc^2"),
@@ -38,7 +38,11 @@ class MockEngine:
 
     def process_text(self, transcript: str, doc_context: str) -> EngineResult:
         t0 = time.perf_counter()
-        a = route(transcript, toy_to_latex)
+        try:
+            a = route(transcript, toy_to_latex, resolve=resolver_from_context(doc_context))
+        except KeyError as e:
+            # Unresolvable target (ordinal out of range etc.) — ask, don't guess.
+            a = Clarify(question=f"Which line did you mean? ({e.args[0]})")
         ms = (time.perf_counter() - t0) * 1000
         if a is None or isinstance(a, str):
             a = TextReply(text=f"app intent: {a}")

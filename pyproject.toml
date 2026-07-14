@@ -12,13 +12,12 @@ dependencies = [
 
 [project.optional-dependencies]
 s2l = [
-  # Phase 3: real engine
+  # Phase 3 real engine. Model-loading logic is vendored from
+  # github.com/DingoOz/speech-to-LateX into engine/s2l_engine.py + metrics.py
+  # (their pyproject pins bleeding-edge torch/transformers we don't need).
   "faster-whisper>=1.0",
   "transformers>=4.44",
-  "torch>=2.3",
-  "accelerate",
-  "bitsandbytes",
-  # vendor github.com/DingoOz/speech-to-LateX or add as git dep here
+  "torch>=2.7",
 ]
 audio = [
   # Phase 4/5
@@ -27,10 +26,19 @@ audio = [
   "openwakeword",
 ]
 eval = ["sympy", "jiwer"]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "httpx>=0.27"]  # httpx: starlette TestClient ws round-trip tests
 
 [project.scripts]
 scribe = "scribe.cli:main"
+
+[[tool.uv.index]]
+# CUDA 12.8 wheels (RTX 4060 Ti / sm_89; also covers 50-series sm_120).
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
 
 [build-system]
 requires = ["hatchling"]

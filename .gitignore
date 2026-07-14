@@ -1,0 +1,11 @@
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# training data sessions (GemmaApollo dataset lives outside git)
+data/
+
+# model caches if pointed locally
+.cache/

@@ -3,49 +3,59 @@
 Work the phases in order. Each phase has acceptance criteria; do not start the
 next phase until they pass. Pure-logic phases (1, 2) need no GPU.
 
-## Phase 0 — Environment
-- [ ] `uv sync` installs; `uv run pytest` runs (empty suite ok).
-- [ ] Vendor or pip-install the speech-to-LateX package (github.com/DingoOz/speech-to-LateX)
+## Phase 0 — Environment ✅
+- [x] `uv sync` installs; `uv run pytest` runs (empty suite ok).
+- [x] Vendor or pip-install the speech-to-LateX package (github.com/DingoOz/speech-to-LateX)
       as an optional dependency group `s2l` so pure-logic dev works without it.
-- **Accept:** fresh clone → `uv sync && uv run pytest` green on CPU-only machine.
+      (Vendored: model-loading logic in `engine/s2l_engine.py`, CER/normalize in
+      `metrics.py` — upstream pins bleeding-edge deps we don't want.)
+- **Accept:** fresh clone → `uv sync && uv run pytest` green on CPU-only machine. ✅
 
-## Phase 1 — Contracts + DocState (pure python)
-- [ ] Finalize pydantic models in `engine/base.py` (already stubbed — extend, don't rename).
-- [ ] Implement `docstate.py`: apply each Action, stable e-IDs, label support,
+## Phase 1 — Contracts + DocState (pure python) ✅
+- [x] Finalize pydantic models in `engine/base.py` (already stubbed — extend, don't rename).
+- [x] Implement `docstate.py`: apply each Action, stable e-IDs, label support,
       snapshot/undo stack (depth 50), `render_context()` producing
       `[e1] \frac{1}{2}mv^2  [e2] E = mc^2`.
-- [ ] Implement `router.py` transcript grammar (port the regexes from
+- [x] Implement `router.py` transcript grammar (port the regexes from
       frontend/index.html `routeUtterance`, add ordinal targeting:
       "line two" → 2nd line's id; "the last line" → last id).
 - **Accept:** `uv run pytest tests/test_docstate.py tests/test_router.py` green;
   includes cases: unknown target id → error Action rejected; undo after delete
-  restores id ordering; ordinal + explicit id targeting both resolve.
+  restores id ordering; ordinal + explicit id targeting both resolve. ✅
 
-## Phase 2 — Server + WS protocol + mock engine
-- [ ] `server.py`: FastAPI app, serves `frontend/`, ws endpoint `/ws`.
-- [ ] Implement `PROTOCOL.md` exactly (client sends utterance text or audio;
+## Phase 2 — Server + WS protocol + mock engine ✅
+- [x] `server.py`: FastAPI app, serves `frontend/`, ws endpoint `/ws`.
+- [x] Implement `PROTOCOL.md` exactly (client sends utterance text or audio;
       server replies status/transcript/action frames).
-- [ ] `MockEngine` that echoes the frontend's toy converter behavior, so the
+- [x] `MockEngine` that echoes the frontend's toy converter behavior, so the
       full loop runs with zero models.
-- [ ] Modify `frontend/index.html`: when ws connects, `routeUtterance` sends to
+- [x] Modify `frontend/index.html`: when ws connects, `routeUtterance` sends to
       server instead of local parsing; falls back to local mode if no ws.
 - **Accept:** `uv run scribe serve`, open browser, dictate via text box →
   pending line appears via ws round-trip; Action console shows server-issued
-  Actions; disconnect server → UI falls back to local mode.
+  Actions; disconnect server → UI falls back to local mode. ✅ (verified live
+  over ws incl. error containment, ordinal commands, scratch/undo)
 
-## Phase 3 — S2LEngine (real models)
-- [ ] `engine/s2l_engine.py`: faster-whisper (int8) + the marsianin500
+## Phase 3 — S2LEngine (real models) ✅ (CER validation deferred to Phase 7)
+- [x] `engine/s2l_engine.py`: faster-whisper (int8) + the marsianin500
       post-correction checkpoint, lazy-loaded. Config flag to swap
-      large-v3 / large-v3-turbo / distil-large-v3.
-- [ ] Command path: transcript classified as command → prompted local LLM
+      large-v3 / large-v3-turbo / distil-large-v3 (`--asr-model` on bench).
+      NOTE: ct2 must run one warm-up transcribe BEFORE torch loads the
+      corrector, else torch matmuls die with CUBLAS_STATUS_EXECUTION_FAILED
+      (Windows, ct2 4.8 + torch 2.11 in one process) — see _lazy_load().
+- [x] Command path: transcript classified as command → prompted local LLM
       (reuse the Qwen weights already resident; a strict JSON-only prompt
       emitting one Action) with regex-grammar fast path first.
-- [ ] `scribe bench`: run fixture wavs (generate with Piper or reuse repo's
-      tests/fixtures) through the engine; report per-stage latency
-      (ASR / correction / total) and CER against fixture labels.
-- **Accept:** bench runs on the 5070 Ti with both models resident under 10 GB
-  VRAM total; median end-to-end latency < 1.5 s per ≤5 s utterance; CER on
-  fixtures within a few points of the repo's published eval script results.
+- [x] `scribe bench`: fixture wavs (2 vendored from the reference repo's
+      MMS-TTS clips + 2 generated with Windows SAPI) through the engine;
+      per-stage latency (asr / route / total) + CER vs labels.json.
+- **Accept:** measured on the RTX 4060 Ti 16 GB (actual hardware; CLAUDE.md
+  says 5070 Ti): VRAM peak 4.9 GB < 10 GB ✅; median end-to-end 1.06 s < 1.5 s ✅.
+  CER on the 4 synthetic fixtures: 0.34 whitespace-stripped (best clip 0.08) —
+  NOT yet comparable to the paper's numbers; the synthetic voices are partly
+  out-of-distribution and one clip's ASR mishears the TTS ("minus squared x").
+  Real CER comparison = run the reference eval on the marsianin500/Speech2Latex
+  HF test split, which is exactly Phase 7's eval harness. ⚠ carried forward.
 
 ## Phase 4 — Live audio: VAD + mic streaming
 - [ ] `audio/vad.py`: Silero VAD chunker on a 16 kHz mic stream
