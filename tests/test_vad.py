@@ -1,7 +1,8 @@
 """UtteranceChunker segmentation logic — pure python, fake VAD, no models."""
 import numpy as np
 
-from scribe.audio.vad import FRAME_MS, FRAME_SAMPLES, SAMPLE_RATE, UtteranceChunker, wav_bytes
+from scribe.audio.vad import (FRAME_MS, FRAME_SAMPLES, SAMPLE_RATE,
+                              UtteranceChunker, wav_bytes, wav_to_float32)
 
 
 def frames(n):
@@ -84,3 +85,34 @@ def test_wav_bytes_roundtrip():
         assert w.getframerate() == SAMPLE_RATE
         assert w.getnchannels() == 1
         assert w.getnframes() == len(pcm)
+
+
+def test_wav_to_float32_inverts_wav_bytes():
+    pcm = np.sin(np.linspace(0, 100, SAMPLE_RATE)).astype(np.float32) * 0.8
+    out = wav_to_float32(wav_bytes(pcm))
+    assert out.dtype == np.float32 and len(out) == len(pcm)
+    assert np.allclose(out, pcm, atol=1.0 / 32767)   # int16 quantization
+
+
+def test_wav_to_float32_rejects_wrong_formats():
+    import io
+    import wave
+    import pytest
+
+    def make_wav(channels=1, width=2, rate=SAMPLE_RATE):
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(channels)
+            w.setsampwidth(width)
+            w.setframerate(rate)
+            w.writeframes(b"\x00" * (width * channels * 100))
+        return buf.getvalue()
+
+    with pytest.raises(ValueError, match="mono"):
+        wav_to_float32(make_wav(channels=2))
+    with pytest.raises(ValueError, match="16-bit"):
+        wav_to_float32(make_wav(width=1))
+    with pytest.raises(ValueError, match="Hz"):
+        wav_to_float32(make_wav(rate=44100))
+    with pytest.raises(ValueError, match="not a wav"):
+        wav_to_float32(b"definitely not RIFF")

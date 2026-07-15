@@ -10,7 +10,7 @@ from .base import EngineResult
 class GemmaEngine:
     name = "gemma"
 
-    def __init__(self, checkpoint: str = "TBD/gemmapollo-12b", device: str = "cuda"):
+    def __init__(self, checkpoint: str = "TBD/gemmapollo-12b", device: str = "auto"):
         self.checkpoint = checkpoint
 
     def process(self, audio, doc_context: str) -> EngineResult:

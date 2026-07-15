@@ -23,9 +23,10 @@ def load_labels(fixtures: Path = FIXTURES) -> list[dict]:
 
 
 def run_bench(engine_name: str = "s2l", asr_model: str | None = None,
-              fixtures: Path = FIXTURES) -> dict:
-    from .server import make_engine
-    engine = make_engine(engine_name)
+              fixtures: Path = FIXTURES,
+              engine_kwargs: dict | None = None) -> dict:
+    from .engine import make_engine
+    engine = make_engine(engine_name, **(engine_kwargs or {}))
     if asr_model and hasattr(engine, "asr_model"):
         engine.asr_model = asr_model
 

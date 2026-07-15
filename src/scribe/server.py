@@ -16,30 +16,21 @@ from pydantic import TypeAdapter
 
 from .datalogger import SessionLogger
 from .docstate import DocState
+from .engine import make_engine
 from .engine.base import Action, Clarify, TextReply
-from .engine.mock_engine import MockEngine
 
 ACTION_ADAPTER = TypeAdapter(Action)
 
-def make_engine(name: str):
-    if name == "mock":
-        return MockEngine()
-    if name == "s2l":
-        from .engine.s2l_engine import S2LEngine
-        return S2LEngine()
-    if name == "gemma":
-        from .engine.gemma_engine import GemmaEngine
-        return GemmaEngine()
-    raise ValueError(name)
-
 def build_app(engine_name: str = "mock", mic: bool = False,
               wakeword_models: dict[str, str] | None = None,
-              mic_device: int | None = None) -> FastAPI:
+              mic_device: int | None = None,
+              engine_kwargs: dict | None = None) -> FastAPI:
     """wakeword_models: {model_path_or_name: intent} for the Phase 5 spotters
     (requires mic=True). None -> auto-load DEFAULT_MODELS paths that exist.
-    mic_device: input device index (None = system default)."""
+    mic_device: input device index (None = system default).
+    engine_kwargs: forwarded to the engine constructor (e.g. url= for remote)."""
     app = FastAPI(title="GemmaApollo Scribe")
-    engine = make_engine(engine_name)
+    engine = make_engine(engine_name, **(engine_kwargs or {}))
     doc = DocState()
     logger = SessionLogger()
     clients: set[WebSocket] = set()

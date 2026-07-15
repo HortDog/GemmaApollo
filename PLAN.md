@@ -104,6 +104,23 @@ next phase until they pass. Pure-logic phases (1, 2) need no GPU.
   engine is busy. ⚠ The 10-minute-dictation false-positive test runs after
   the real models are trained (fires are logged; audit data/sessions).
 
+## Phase 5.5 — Portability + inference split ✅ (issue #1)
+- [x] OS-agnostic packaging: torch's CUDA index is marker-gated to
+      Windows / x86-64 Linux; macOS and ARM Linux resolve CPU/MPS wheels
+      from PyPI. `S2LEngine` device default is `"auto"` (cuda → cpu; the
+      corrector may use MPS — CTranslate2 has none, so macOS ASR is CPU int8).
+      CUDA warm-up hack now gated on the resolved device.
+- [x] `scribe infer-serve`: standalone inference server hosting one engine
+      behind HTTP (INFERENCE.md); `RemoteEngine` proxy implements the frozen
+      Engine protocol over it (`scribe serve --engine remote --infer-url …`).
+      Wire format is EngineResult JSON verbatim — schema untouched. VAD +
+      spotters + datalogger stay in the app process.
+- **Accept:** full ws loop green over the HTTP boundary with the mock engine
+  (tests/test_remote_engine.py, tests/test_infer_server.py); existing 48
+  tests unchanged. GPU s2l path needs a manual smoke test on the CUDA box.
+  ⚠ `uv.lock` regeneration (`uv lock`) pending — the dev sandbox cannot
+  reach download.pytorch.org; run it on the next `uv sync`.
+
 ## Phase 6 — Training-data logger
 - [ ] `datalogger.py`: per session dir under `data/sessions/<ts>/`:
       `NNN.wav` + `NNN.json` {doc_context, transcript, engine_action,

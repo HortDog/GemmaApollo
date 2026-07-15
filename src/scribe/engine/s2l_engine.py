@@ -44,10 +44,13 @@ _ACTION_ADAPTER = TypeAdapter(Action)
 class S2LEngine:
     name = "s2l"
 
-    def __init__(self, asr_model: str = "large-v3", device: str = "cuda",
+    def __init__(self, asr_model: str = "large-v3", device: str = "auto",
                  compute_type: str = "int8"):
         # asr_model: "large-v3" | "large-v3-turbo" | "distil-large-v3"
         # (config switch per CLAUDE.md; benchmark via `scribe bench`).
+        # device: "auto" resolves to cuda when available, else cpu (ASR) and
+        # cuda/mps/cpu (corrector) — faster-whisper/CTranslate2 has no MPS
+        # backend, so macOS ASR always runs on CPU.
         self.asr_model = asr_model
         self.device = device
         self.compute_type = compute_type
@@ -59,27 +62,38 @@ class S2LEngine:
     def _lazy_load(self):
         if self._asr is not None:
             return
-        # Import torch FIRST: it registers its bundled cuBLAS/cuDNN DLLs in
-        # the process, which CTranslate2 (faster-whisper) then finds — the
-        # standard fix for GPU faster-whisper on Windows without a system CUDA.
+        # Import torch FIRST: on Windows it registers its bundled cuBLAS/cuDNN
+        # DLLs in the process, which CTranslate2 (faster-whisper) then finds —
+        # the standard fix for GPU faster-whisper without a system CUDA. The
+        # ordering is harmless on other platforms (torch is needed anyway).
         import torch
         from faster_whisper import WhisperModel
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        self._asr = WhisperModel(self.asr_model, device=self.device,
+        if self.device == "auto":
+            asr_device = "cuda" if torch.cuda.is_available() else "cpu"
+            corrector_device = asr_device
+            if asr_device == "cpu" and torch.backends.mps.is_available():
+                corrector_device = "mps"  # plain-torch corrector can use MPS
+        else:
+            asr_device = corrector_device = self.device
+
+        self._asr = WhisperModel(self.asr_model, device=asr_device,
                                  compute_type=self.compute_type)
-        # Warm up CTranslate2 BEFORE torch touches cuBLAS: ct2 must create its
-        # CUDA/cuBLAS handles first or torch matmuls later fail with
-        # CUBLAS_STATUS_EXECUTION_FAILED (observed on Windows, ct2 4.8 +
-        # torch 2.11 sharing one process). One short silent clip suffices.
-        import numpy as np
-        list(self._asr.transcribe(np.zeros(8000, dtype=np.float32),
-                                  language="en", beam_size=1)[0])
+        if asr_device == "cuda":
+            # Warm up CTranslate2 BEFORE torch touches cuBLAS: ct2 must create
+            # its CUDA/cuBLAS handles first or torch matmuls later fail with
+            # CUBLAS_STATUS_EXECUTION_FAILED (observed on Windows, ct2 4.8 +
+            # torch 2.11 sharing one process). One short silent clip suffices.
+            import numpy as np
+            list(self._asr.transcribe(np.zeros(8000, dtype=np.float32),
+                                      language="en", beam_size=1)[0])
         self._tokenizer = AutoTokenizer.from_pretrained(CORRECTOR_MODEL)
         self._corrector = AutoModelForCausalLM.from_pretrained(
             CORRECTOR_MODEL,
-            dtype=torch.float16 if self.device.startswith("cuda") else torch.float32,
-        ).to(self.device)
+            # fp16 only on cuda; fp32 on cpu/mps (fp16-on-MPS untested here).
+            dtype=torch.float16 if corrector_device == "cuda" else torch.float32,
+        ).to(corrector_device)
         self._corrector.eval()
 
     # ------------------------------------------------------------------ stages

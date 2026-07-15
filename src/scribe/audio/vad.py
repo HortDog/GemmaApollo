@@ -36,6 +36,25 @@ def wav_bytes(pcm: np.ndarray, sample_rate: int = SAMPLE_RATE) -> bytes:
     return buf.getvalue()
 
 
+def wav_to_float32(data: bytes, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
+    """Inverse of wav_bytes: 16-bit PCM mono wav file bytes -> float32 [-1,1].
+    The engine contract is 16 kHz mono, so anything else is rejected rather
+    than silently resampled."""
+    try:
+        w = wave.open(io.BytesIO(data), "rb")
+    except (wave.Error, EOFError) as e:
+        raise ValueError(f"not a wav file: {e}") from e
+    with w:
+        if w.getnchannels() != 1:
+            raise ValueError(f"wav must be mono, got {w.getnchannels()} channels")
+        if w.getsampwidth() != 2:
+            raise ValueError(f"wav must be 16-bit PCM, got {w.getsampwidth() * 8}-bit")
+        if w.getframerate() != sample_rate:
+            raise ValueError(f"wav must be {sample_rate} Hz, got {w.getframerate()}")
+        raw = w.readframes(w.getnframes())
+    return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0
+
+
 @dataclass
 class UtteranceChunker:
     """Turns a stream of fixed-size frames + speech probabilities into

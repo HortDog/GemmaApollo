@@ -8,7 +8,10 @@ or reject becomes training data for **GemmaApollo** — a planned end-to-end
 audio→edit-action model fine-tuned from Gemma.
 
 Nothing leaves your machine: ASR, LaTeX correction, VAD, and wake-word
-spotting all run on the local GPU (developed on 16 GB cards).
+spotting all run on the local GPU (developed on 16 GB cards). Runs on
+Windows, Linux, and macOS; the heavy models can optionally live in a separate
+inference server process — even on another machine — see
+[INFERENCE.md](INFERENCE.md).
 
 ## Quickstart
 
@@ -21,6 +24,30 @@ uv run scribe serve                  # http://127.0.0.1:8017, mock engine
 uv sync --extra dev --extra s2l --extra audio
 uv run scribe serve --engine s2l --mic
 ```
+
+### Per-OS notes
+
+| | |
+|---|---|
+| **Windows** | works as-is; CUDA torch wheels are pulled automatically on NVIDIA machines |
+| **Linux** | sounddevice needs PortAudio: `sudo apt install libportaudio2`. NVIDIA x86-64 gets CUDA wheels; other machines get CPU torch |
+| **macOS** | grant mic permission to your terminal app on first `--mic` run. faster-whisper has no MPS backend, so ASR runs CPU int8 — use `--asr-model distil-large-v3`, or better, run the engine remotely on a CUDA box (below) |
+
+The install is split so each host only pulls what it runs: base deps serve
+the app with a remote engine (no torch at all), `--extra audio` adds the mic
+stack (CPU torch via Silero), `--extra s2l` adds the heavy models.
+
+### Split inference (optional)
+
+Run the models in their own process — or on a different machine/OS entirely:
+
+```bash
+uv run scribe infer-serve --engine s2l --preload    # GPU box (:8018)
+uv run scribe serve --engine remote --mic           # app, dictation, UI
+```
+
+See [INFERENCE.md](INFERENCE.md) for the API, two-machine setup, and
+security notes.
 
 Open the page, then just talk:
 
@@ -67,7 +94,8 @@ edits are positives, scratches are negatives, wake-word fires are audited.
 ## Commands
 
 ```bash
-uv run scribe serve [--engine mock|s2l] [--mic] [--mic-device N] [--port 8017]
+uv run scribe serve [--engine mock|s2l|remote] [--mic] [--mic-device N] [--port 8017]
+uv run scribe infer-serve [--engine s2l] [--preload] [--port 8018]  # see INFERENCE.md
 uv run scribe bench --engine s2l     # per-stage latency + CER on fixture clips
 uv run scribe mics                   # list audio input devices
 uv run scribe mic-test --seconds 10  # console level/VAD tester

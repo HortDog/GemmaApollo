@@ -27,6 +27,13 @@ Two engines implement one interface (`src/scribe/engine/base.py`):
    tool call. Placeholder only for now; the Action schema is its training
    target, so **the schema is frozen** — changes require explicit sign-off.
 
+The Engine may run in-process (default) or behind `scribe infer-serve` via
+`RemoteEngine` (`--engine remote`) — an HTTP proxy implementing the same
+interface; the wire format is EngineResult JSON verbatim, frozen with the
+schema (see INFERENCE.md). VAD + wake-word spotters always stay in the app
+process. OS support: Windows / Linux / macOS (macOS ASR is CPU-only —
+CTranslate2 has no MPS backend).
+
 ## Hard rules
 
 - `commit`, `undo`, `scratch that` are NEVER engine Actions. They are
@@ -51,6 +58,7 @@ Two engines implement one interface (`src/scribe/engine/base.py`):
 ```
 uv sync                                   # env
 uv run scribe serve                       # FastAPI + ws on :8017, serves frontend/
+uv run scribe infer-serve --engine s2l    # standalone inference server on :8018 (INFERENCE.md)
 uv run scribe bench --engine s2l          # latency benchmark on fixture clips
 uv run pytest                             # tests (schema, router, docstate are pure-python)
 ```

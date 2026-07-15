@@ -3,6 +3,10 @@
 JSON text frames unless noted. Keep server.py and frontend/index.html in sync
 with this file.
 
+This file covers the client↔app protocol only. The app↔inference-server HTTP
+boundary (optional split, `scribe infer-serve`) is documented in
+[INFERENCE.md](INFERENCE.md) and does not affect any frame below.
+
 ## Client → Server
 | type        | fields                          | meaning |
 |-------------|---------------------------------|---------|
