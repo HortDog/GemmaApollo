@@ -42,11 +42,12 @@ explicit = true
 [tool.uv.sources]
 torch = [
   # CUDA wheels only where NVIDIA is plausible; every environment NOT matched
-  # by a marker (macOS, ARM Linux) resolves torch from PyPI — the universal
-  # CPU/MPS wheel. CPU-only x86_64 Linux still gets the CUDA build (runs fine
-  # on CPU, just a bigger download); use --engine remote there to skip torch
-  # entirely on the app host.
-  { index = "pytorch-cu128", marker = "sys_platform == 'win32' or (sys_platform == 'linux' and platform_machine == 'x86_64')" },
+  # by a marker (macOS, ARM Linux, Windows-on-ARM) resolves torch from PyPI —
+  # the CPU/MPS wheel. CPU-only x86_64 Linux still gets the CUDA build (runs
+  # fine on CPU, just a bigger download); use --engine remote there to skip
+  # torch entirely on the app host. Windows-on-ARM evaluates
+  # platform_machine == 'ARM64' even under an emulated x64 Python.
+  { index = "pytorch-cu128", marker = "(sys_platform == 'win32' and platform_machine == 'AMD64') or (sys_platform == 'linux' and platform_machine == 'x86_64')" },
 ]
 
 [build-system]

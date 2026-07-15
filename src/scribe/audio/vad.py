@@ -147,9 +147,34 @@ class SileroVAD:
             self._model.reset_states()
 
 
+def import_sounddevice():
+    """Lazy `import sounddevice`, working around Windows-on-ARM under an x64
+    (emulated) Python: the win_amd64 wheel ships only the x64 PortAudio DLL,
+    but sounddevice picks its DLL by physical machine (ARM64) and fails with
+    error 0x7e. The x64 DLL is the right one for this process — steer the
+    one-time import to it. Native ARM64 Python needs no workaround (its
+    win_arm64 wheel bundles libportaudioarm64.dll)."""
+    import sys
+    if "sounddevice" in sys.modules:
+        return sys.modules["sounddevice"]
+    import platform
+    import sysconfig
+    if (sys.platform == "win32" and platform.machine() == "ARM64"
+            and sysconfig.get_platform() == "win-amd64"):
+        orig = platform.machine
+        platform.machine = lambda: "AMD64"
+        try:
+            import sounddevice as sd
+        finally:
+            platform.machine = orig
+        return sd
+    import sounddevice as sd
+    return sd
+
+
 def list_input_devices() -> list[dict]:
     """Input-capable audio devices: [{index, name, default}]. Lazy import."""
-    import sounddevice as sd
+    sd = import_sounddevice()
 
     default_idx = None
     try:
@@ -171,7 +196,7 @@ def mic_frames(device: int | None = None, stop=None) -> Iterator[np.ndarray]:
     soon after it is set, enabling live device switching."""
     import queue
 
-    import sounddevice as sd
+    sd = import_sounddevice()
 
     q: queue.Queue[np.ndarray] = queue.Queue(maxsize=256)
 

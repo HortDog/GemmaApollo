@@ -384,7 +384,8 @@ def build_app(engine_name: str = "mock", mic: bool = False,
 
             async def select(device: int):
                 def probe():
-                    import sounddevice as sd
+                    from .audio.vad import import_sounddevice
+                    sd = import_sounddevice()
                     sd.check_input_settings(device=device, samplerate=16000,
                                             channels=1)
                 try:

@@ -2,7 +2,8 @@
 import numpy as np
 
 from scribe.audio.vad import (FRAME_MS, FRAME_SAMPLES, SAMPLE_RATE,
-                              UtteranceChunker, wav_bytes, wav_to_float32)
+                              UtteranceChunker, import_sounddevice, wav_bytes,
+                              wav_to_float32)
 
 
 def frames(n):
@@ -116,3 +117,48 @@ def test_wav_to_float32_rejects_wrong_formats():
         wav_to_float32(make_wav(rate=44100))
     with pytest.raises(ValueError, match="not a wav"):
         wav_to_float32(b"definitely not RIFF")
+
+
+def test_import_sounddevice_returns_already_imported_module(monkeypatch):
+    import sys
+    import types
+    stub = types.ModuleType("sounddevice")
+    monkeypatch.setitem(sys.modules, "sounddevice", stub)
+    assert import_sounddevice() is stub
+
+
+def test_import_sounddevice_shims_x64_python_on_arm_windows(monkeypatch):
+    """On Windows-on-ARM under an emulated x64 Python, the import must see
+    platform.machine() == "AMD64" (so sounddevice loads the x64 PortAudio DLL
+    that ships in the win_amd64 wheel) and the patch must be undone after."""
+    import importlib.util
+    import platform
+    import sys
+    import sysconfig
+
+    monkeypatch.delitem(sys.modules, "sounddevice", raising=False)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(platform, "machine", lambda: "ARM64")
+    monkeypatch.setattr(sysconfig, "get_platform", lambda: "win-amd64")
+
+    seen = {}
+
+    class FakeLoader:
+        def create_module(self, spec):
+            return None                       # default module creation
+
+        def exec_module(self, module):
+            seen["machine_during_import"] = platform.machine()
+
+    class FakeFinder:
+        def find_spec(self, name, path=None, target=None):
+            if name != "sounddevice":
+                return None
+            return importlib.util.spec_from_loader(name, FakeLoader())
+
+    monkeypatch.setattr(sys, "meta_path", [FakeFinder()] + sys.meta_path)
+    sd = import_sounddevice()
+    assert seen["machine_during_import"] == "AMD64"
+    assert sd is sys.modules["sounddevice"]
+    assert platform.machine() == "ARM64"   # patch reverted after import
+    monkeypatch.delitem(sys.modules, "sounddevice", raising=False)

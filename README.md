@@ -30,6 +30,7 @@ uv run scribe serve --engine s2l --mic
 | | |
 |---|---|
 | **Windows** | works as-is; CUDA torch wheels are pulled automatically on NVIDIA machines |
+| **Windows on ARM** (Snapdragon) | works, including `--mic` with the emulated x64 Python (the app steers sounddevice to the right PortAudio DLL automatically). No CUDA, and CTranslate2 has no ARM64 wheels — pair with the remote engine: `scribe serve --engine remote --mic` against a GPU box (see [INFERENCE.md](INFERENCE.md)) |
 | **Linux** | sounddevice needs PortAudio: `sudo apt install libportaudio2`. NVIDIA x86-64 gets CUDA wheels; other machines get CPU torch |
 | **macOS** | grant mic permission to your terminal app on first `--mic` run. faster-whisper has no MPS backend, so ASR runs CPU int8 — use `--asr-model distil-large-v3`, or better, run the engine remotely on a CUDA box (below) |
 
