@@ -84,3 +84,17 @@ def test_wav_bytes_roundtrip():
         assert w.getframerate() == SAMPLE_RATE
         assert w.getnchannels() == 1
         assert w.getnframes() == len(pcm)
+
+
+def test_reset_drops_partial_utterance():
+    # Mute mid-utterance: reset must discard captured speech AND pre-roll so
+    # nothing heard before/while muted leaks into the next utterance.
+    c = UtteranceChunker(is_speech=lambda f: 0.0, pad_ms=200, end_silence_ms=500)
+    run(c, [0.0] * 20 + [0.9] * n_frames(1000))   # open, still active
+    c.reset()
+    # silence alone must not close anything into an utterance now
+    assert run(c, [0.0] * n_frames(1000)) == []
+    # and a fresh utterance afterwards works normally
+    out = run(c, [0.9] * n_frames(1000) + [0.0] * n_frames(600))
+    assert len(out) == 1
+    assert len(out[0]) / SAMPLE_RATE < 1.8        # no stale pre-mute frames

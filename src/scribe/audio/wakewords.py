@@ -23,11 +23,14 @@ import numpy as np
 CHUNK_SAMPLES = 1280        # 80 ms @ 16 kHz — openWakeWord's expected hop
 SAMPLE_RATE = 16_000
 
-# intent -> default custom model path (produced by tools/wakewords/train.py)
+# intent -> default custom model path (produced by tools/wakewords/train.py).
+# `wake` uses openWakeWord's pretrained hey-jarvis model (bare name, no path):
+# it unmutes dictation — the mic starts muted and "hey Jarvis" wakes it.
 DEFAULT_MODELS = {
     "commit": "models/wakewords/commit.onnx",
     "undo": "models/wakewords/undo.onnx",
     "scratch": "models/wakewords/scratch_that.onnx",
+    "wake": "hey_jarvis_v0.1",
 }
 
 
@@ -84,8 +87,20 @@ class OWWScorer:
     def _load(self):
         if self._model is not None:
             return
+        from pathlib import Path
+
         from openwakeword.model import Model
         paths = list(self.model_map)
+        # Bare pretrained names (e.g. hey_jarvis_v0.1) resolve from the
+        # openwakeword package cache; fetch once on first use. Existing
+        # files are skipped, and offline-with-cache just proceeds to Model().
+        pretrained = [p for p in paths if not Path(p).exists()]
+        if pretrained:
+            try:
+                from openwakeword.utils import download_models
+                download_models(model_names=pretrained)
+            except Exception as e:
+                print(f"wakewords: pretrained download skipped ({e})", flush=True)
         self._model = Model(wakeword_models=paths, inference_framework="onnx")
         # oww keys predictions by model basename, not the given path
         for path, intent in self.model_map.items():

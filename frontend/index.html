@@ -70,6 +70,20 @@
   .docline.editing{border-color:var(--commit); box-shadow:0 0 0 1px var(--commit)}
   .mq-holder{min-width:220px; font-size:1.15rem}
   .mathquill-edit{border:none !important; box-shadow:none !important; width:100%}
+  /* raw-LaTeX fallback editor (lines MathQuill can't represent) */
+  .rawlatex{
+    width:100%; font-family:'IBM Plex Mono',monospace; font-size:.85rem;
+    padding:7px 10px; border:1px solid var(--line); border-radius:3px;
+    background:var(--paper); color:var(--ink);
+  }
+  .rawlatex:focus-visible{outline:2px solid var(--commit); outline-offset:1px}
+  .rawhint{
+    font-family:'IBM Plex Mono',monospace; font-size:.6rem; color:var(--pending);
+    text-transform:uppercase; letter-spacing:.06em; margin-bottom:4px;
+  }
+  .rawpreview{margin-top:8px; font-size:1.15rem; overflow-x:auto; min-height:1.2em}
+  /* line being live-edited in another tab (edit_preview relay) */
+  .docline.previewing{border-color:var(--pending); border-style:dashed; background:var(--pending-wash)}
   /* ---------- pending strip ---------- */
   #pending{
     border:1.5px dashed var(--pending); background:var(--pending-wash);
@@ -187,6 +201,7 @@
     <button id="commitbtn">Commit</button>
     <button id="scratchbtn" class="warn">Scratch that</button>
     <button id="undobtn">Undo</button>
+    <button id="mutebtn" style="display:none" title="Mic gate — muted until you unmute or say “Hey Jarvis”">Mute</button>
   </div>
   <div class="row" id="microw" style="margin-top:8px; display:none">
     <label for="micsel" class="miclabel">mic</label>
@@ -205,7 +220,8 @@
   </div>
   <div class="hint">
     In the real app this input is your microphone: VAD-chunked utterances go to the engine; “commit / scratch that / undo”
-    are openWakeWord spotters handled instantly by the app. Dictation <em>extends</em> the pending equation piece by piece —
+    are openWakeWord spotters handled instantly by the app. In mic mode the mic starts <em>muted</em> — say “Hey Jarvis”
+    (or click Unmute) to start dictating; commit/undo/scratch keywords work even while muted. Dictation <em>extends</em> the pending equation piece by piece —
     say “commit” to finish the line, “scratch that” to remove the last piece. Raw LaTeX is accepted here as a stand-in for
     the speech→LaTeX stage. Click any committed line to edit it with MathQuill (Enter saves, Esc cancels).
   </div>
@@ -237,6 +253,7 @@ const VSTATE_STYLE = {
   heard:     ['◑ heard',     'var(--pending)'],
   thinking:  ['◌ thinking…', 'var(--pending)'],
   idle:      ['○ idle',      'var(--ink-soft)'],
+  muted:     ['◉ muted · say “Hey Jarvis”', 'var(--danger)'],
 };
 function setVoiceState(state, detail){
   const el = document.getElementById('vstate');
@@ -253,6 +270,35 @@ function setNet(connected){
 }
 
 function wsSend(obj){ if(ws && ws.readyState===1) ws.send(JSON.stringify(obj)); }
+
+// ---------- live edit previews ----------
+// Transient view-only state (PROTOCOL.md `edit_preview`): while someone types
+// in an editor, keystrokes are relayed so every tab's compiled equation tracks
+// live. Never touches DocState — `applied` on save is the real mutation.
+let previews = {};          // target_id -> latex currently being typed
+let previewTimer = null;
+function sendPreview(id, latex){
+  if(!wsMode) return;
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(()=> wsSend({type:'edit_preview', target_id:id, latex}), 120);
+}
+function endPreview(id){
+  if(!wsMode) return;
+  clearTimeout(previewTimer);
+  wsSend({type:'edit_preview', target_id:id, latex:null});
+}
+function renderPreviewLine(id){
+  // Re-render ONE line's compiled math in place — a full renderDoc() here
+  // would rebuild (and wipe) an editor this tab may have open on another line.
+  const line = lines.find(x=>x.id===id);
+  const row = document.querySelector(`.docline[data-id="${id}"]`);
+  if(!line || !row || id===editingId) return;
+  const mc = row.querySelector('.mathcell');
+  const latex = previews[id] !== undefined ? previews[id] : line.latex;
+  row.classList.toggle('previewing', previews[id] !== undefined);
+  try{ katex.render(latex, mc, {throwOnError:false}); }
+  catch(e){ mc.textContent = latex; }
+}
 
 function parseDocContext(ctx){
   // "[e1] latex  [e2] latex" -> [{id,latex}] (entries joined by two spaces)
@@ -280,6 +326,7 @@ function applyServerDoc(ctx, action){
     if(n >= nextId) nextId = n + 1;
   }
   editingId = null;
+  previews = {};   // server truth supersedes any in-flight edit previews
   renderDoc();
 }
 
@@ -303,6 +350,9 @@ function handleServerFrame(msg){
       if(msg.detail && msg.detail.startsWith('engine=')){
         document.getElementById('engname').textContent = msg.detail.slice(7) + ' (server)';
       }
+      // Only muted/listening frames carry the mic-gate state; heard/thinking/
+      // idle are transient pipeline states and must not flip the button.
+      if(msg.state==='muted' || msg.state==='listening') setMuted(msg.state==='muted');
       setVoiceState(msg.state, msg.detail);
       break;
     case 'transcript':
@@ -338,6 +388,7 @@ function handleServerFrame(msg){
       const row = document.getElementById('microw');
       const sel = document.getElementById('micsel');
       row.style.display = 'flex';
+      document.getElementById('mutebtn').style.display = '';  // mic mode only
       sel.innerHTML = '';
       for(const d of msg.devices){
         const o = document.createElement('option');
@@ -346,6 +397,13 @@ function handleServerFrame(msg){
         if(msg.current !== null ? d.index === msg.current : d.default) o.selected = true;
         sel.appendChild(o);
       }
+      break;
+    }
+    case 'edit_preview': {
+      if(msg.target_id === editingId) break;   // our own editor owns this line
+      if(msg.latex === null || msg.latex === undefined) delete previews[msg.target_id];
+      else previews[msg.target_id] = msg.latex;
+      renderPreviewLine(msg.target_id);
       break;
     }
     case 'miclevel': {
@@ -359,6 +417,19 @@ function handleServerFrame(msg){
 }
 
 // ---------- mic panel wiring ----------
+// Mute gate: server is source of truth — the button reflects only status
+// frames (muted/listening) and never assumes the toggle succeeded.
+let micMuted = false;
+function setMuted(on){
+  micMuted = on;
+  const b = document.getElementById('mutebtn');
+  b.textContent = on ? 'Unmute' : 'Mute';
+  b.classList.toggle('warn', on);
+}
+document.getElementById('mutebtn').onclick = ()=>{
+  wsSend({type:'intent', name: micMuted ? 'wake' : 'mute'});
+};
+
 let micTesting = false;
 document.getElementById('micsel').onchange = e=>{
   wsSend({type:'mic', action:'select', device: parseInt(e.target.value, 10)});
@@ -381,7 +452,7 @@ function connectWs(){
     setNet(true);
     // The server owns DocState and starts empty; drop the local seed (and its
     // undo history) so the UI mirrors server state. (No resync frame yet.)
-    lines = []; pending = null; editingId = null; undoStack = []; renderDoc();
+    lines = []; pending = null; editingId = null; undoStack = []; previews = {}; renderDoc();
     log({action:'ws_connected', note:'server is source of truth'}, 'info');
   };
   ws.onmessage = ev=>{ try{ handleServerFrame(JSON.parse(ev.data)); }catch(e){} };
@@ -390,6 +461,8 @@ function connectWs(){
     document.getElementById('engname').textContent = 'local toy router';
     document.getElementById('vstate').textContent = '';
     document.getElementById('microw').style.display = 'none';
+    document.getElementById('mutebtn').style.display = 'none';
+    previews = {};
     micTesting = false;
     document.getElementById('mictest').textContent = 'test mic';
     log({action:'ws_closed', note:'local fallback'}, 'info');
@@ -419,25 +492,75 @@ function renderDoc(){
 
     if(editingId === l.id){
       row.classList.add('editing');
+      let getLatex;
+      // Editing always aims for MathQuill: sanitize away typographic-only
+      // tokens MathQuill 0.10 can't parse (\, spacing, \dfrac, \mathrm) so
+      // nearly every line loads in the math box. The maths is unchanged;
+      // saving stores MathQuill's clean latex (raw latex stays the truth).
+      const srcLatex = mqSanitize(l.latex);
       const holder = document.createElement('span');
       holder.className='mq-holder';
       mc.appendChild(holder);
-      const field = MQ.MathField(holder, {
+      let field;   // MathQuill may fire `edit` during construction — guard until assigned
+      field = MQ.MathField(holder, {
         handlers:{
-          enter: ()=> finishEdit(l.id, field.latex())
+          enter: ()=> finishEdit(l.id, getLatex()),
+          edit: ()=> { if(field) sendPreview(l.id, field.latex()); }
         }
       });
-      field.latex(l.latex);
-      field.focus();
-      holder.addEventListener('keydown', e=>{ if(e.key==='Escape'){ editingId=null; renderDoc(); }});
+      field.latex(srcLatex);
+      // If even the sanitized line doesn't round-trip (matrices, align, …)
+      // MathQuill rendered an empty/lossy field and saving would DESTROY the
+      // line — those rare lines fall back to raw-LaTeX text editing
+      // (CLAUDE.md rule). The normalizer ignores rewrites MathQuill does
+      // legitimately (whitespace, \left/\right).
+      // (also canonicalize single-token script groups: MathQuill rewrites
+      // ^{2} -> ^2, _{0} -> _0, ^{\infty} -> ^\infty — same math, not lossy)
+      const mqNorm = s=>s
+        .replace(/\\left|\\right/g,'')
+        .replace(/([_^])\{(\w|\\[A-Za-z]+)\}/g,'$1$2')
+        .replace(/\s+/g,'');
+      if(srcLatex && mqNorm(field.latex()) !== mqNorm(srcLatex)){
+        mc.innerHTML='';
+        const inp = document.createElement('input');
+        inp.type='text'; inp.className='rawlatex'; inp.value=l.latex;
+        inp.setAttribute('aria-label',`Edit raw LaTeX of line ${l.id}`);
+        const why = document.createElement('div'); why.className='rawhint';
+        why.textContent = 'raw latex — MathQuill can’t render this line';
+        // live compiled preview: the raw editor is plain text, so render the
+        // equation underneath as it is typed (MathQuill mode is already WYSIWYG)
+        const prev = document.createElement('div'); prev.className='rawpreview';
+        const renderPrev = ()=>{
+          try{ katex.render(inp.value, prev, {throwOnError:false}); }
+          catch(e){ prev.textContent = inp.value; }
+        };
+        renderPrev();
+        mc.append(why, inp, prev);
+        getLatex = ()=> inp.value;
+        inp.addEventListener('input', ()=>{ renderPrev(); sendPreview(l.id, inp.value); });
+        inp.addEventListener('keydown', e=>{
+          if(e.key==='Enter'){ e.preventDefault(); finishEdit(l.id, inp.value); }
+          if(e.key==='Escape'){ endPreview(l.id); editingId=null; renderDoc(); }
+        });
+        inp.focus();
+        inp.setSelectionRange(inp.value.length, inp.value.length);
+      } else {
+        getLatex = ()=> field.latex();
+        field.focus();
+        holder.addEventListener('keydown', e=>{ if(e.key==='Escape'){ endPreview(l.id); editingId=null; renderDoc(); }});
+      }
       const save=document.createElement('button'); save.className='mini'; save.textContent='save';
-      save.onclick=()=>finishEdit(l.id, field.latex());
+      save.onclick=()=>finishEdit(l.id, getLatex());
       const cancel=document.createElement('button'); cancel.className='mini'; cancel.textContent='cancel';
-      cancel.onclick=()=>{ editingId=null; renderDoc(); };
+      cancel.onclick=()=>{ endPreview(l.id); editingId=null; renderDoc(); };
       tools.innerHTML=''; tools.append(save,cancel); tools.style.opacity=1;
     } else {
-      try{ katex.render(l.latex, mc, {throwOnError:false}); }
-      catch(e){ mc.textContent = l.latex; }
+      // A live preview (someone typing in another tab) overrides the
+      // committed latex in the VIEW only — DocState is untouched.
+      const shown = previews[l.id] !== undefined ? previews[l.id] : l.latex;
+      if(previews[l.id] !== undefined) row.classList.add('previewing');
+      try{ katex.render(shown, mc, {throwOnError:false}); }
+      catch(e){ mc.textContent = shown; }
       mc.onclick = ()=> startEdit(l.id);
       mc.onkeydown = e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); startEdit(l.id);} };
       tools.querySelector('[data-act=edit]').onclick = e=>{ e.stopPropagation(); startEdit(l.id); };
@@ -481,9 +604,26 @@ function renderPending(){
 
 function escapeHtml(s){ return s.replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
 
+// MathQuill 0.10 chokes on typographic-only latex tokens; strip/downgrade
+// them so (nearly) every line opens in the math box. Math content unchanged.
+function mqSanitize(s){
+  let t = s;
+  // stray \\ line breaks mean nothing mid-equation — but inside \begin{...}
+  // environments (matrix/align) they are ROW SEPARATORS, so leave those
+  // lines untouched (they fall back to raw editing with their source intact)
+  if(!/\\begin\{/.test(t)) t = t.replace(/\\\\/g, ' ');
+  return t
+    .replace(/\\[,;:!]/g, ' ')                  // \, \; \: \! spacing
+    .replace(/\\ /g, ' ')                       // backslash-space
+    .replace(/\\[dt]frac\b/g, '\\frac')         // display/text fracs
+    .replace(/\\mathrm\{([A-Za-z]+)\}/g, '$1')  // \mathrm{d} -> d
+    .replace(/\s+/g, ' ').trim();
+}
+
 // ---------- edit flow ----------
 function startEdit(id){ editingId=id; renderDoc(); }
 function finishEdit(id, latex){
+  endPreview(id);   // other tabs settle on the committed state (`applied` follows on save)
   editingId=null;
   const line = lines.find(l=>l.id===id);
   if(line && latex.trim() && latex!==line.latex){

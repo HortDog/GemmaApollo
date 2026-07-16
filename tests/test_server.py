@@ -283,3 +283,93 @@ def test_undo_after_commit():
         ws.send_json({"type": "intent", "name": "undo"})
         undone = _drain_until(ws, "applied")
         assert undone["doc_context"] == ""
+
+
+# ---------------------------------------------------------------- mute gate
+def _fake_mic_stack(monkeypatch):
+    """Run start_mic without hardware: silent fake frames, fake Silero, no
+    device enumeration. wakeword_models={} disables spotters entirely."""
+    import numpy as np
+    import scribe.audio.vad as vadmod
+
+    class FakeVAD:
+        def __call__(self, frame):
+            return 0.0
+
+        def reset(self):
+            pass
+
+    def fake_frames(device, stop=None):
+        import time
+        while stop is None or not stop.is_set():
+            time.sleep(0.005)
+            yield np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(vadmod, "SileroVAD", FakeVAD)
+    monkeypatch.setattr(vadmod, "mic_frames", fake_frames)
+    monkeypatch.setattr(vadmod, "list_input_devices", lambda: [])
+
+
+def test_mic_mode_starts_muted_wake_and_mute_intents_toggle(monkeypatch):
+    _fake_mic_stack(monkeypatch)
+    client = TestClient(build_app("mock", mic=True, wakeword_models={}))
+    with client.websocket_connect("/ws") as ws:
+        hello = ws.receive_json()
+        assert hello["type"] == "status" and hello["state"] == "muted"
+
+        # typed utterances bypass the mic gate; trailing status stays muted
+        ws.send_json({"type": "utterance", "text": "x squared"})
+        _drain_until(ws, "proposal")
+        _drain_until(ws, "status", state="muted")
+
+        ws.send_json({"type": "intent", "name": "wake"})
+        _drain_until(ws, "status", state="listening", detail="unmuted")
+        ws.send_json({"type": "intent", "name": "mute"})
+        _drain_until(ws, "status", state="muted", detail="muted")
+
+
+def test_start_unmuted_skips_wake_gate(monkeypatch):
+    _fake_mic_stack(monkeypatch)
+    client = TestClient(build_app("mock", mic=True, wakeword_models={},
+                                  start_unmuted=True))
+    with client.websocket_connect("/ws") as ws:
+        hello = ws.receive_json()
+        assert hello["type"] == "status" and hello["state"] == "listening"
+
+
+def test_default_models_include_hey_jarvis_wake():
+    from scribe.audio.wakewords import DEFAULT_MODELS
+    assert DEFAULT_MODELS["wake"] == "hey_jarvis_v0.1"
+
+
+# ------------------------------------------------------------- edit_preview
+def test_edit_preview_relays_without_mutation_or_logging():
+    from pathlib import Path
+    client = TestClient(build_app("mock"))
+    with client.websocket_connect("/ws") as ws:
+        _drain_until(ws, "status")
+        ws.send_json({"type": "utterance", "text": "a"})
+        p = _drain_until(ws, "proposal")
+        ws.send_json({"type": "resolve",
+                      "pending_id": p["pending_id"], "verdict": "commit"})
+        _drain_until(ws, "applied")
+
+        # live keystrokes relay verbatim...
+        ws.send_json({"type": "edit_preview", "target_id": "e1", "latex": "x^2"})
+        pv = _drain_until(ws, "edit_preview")
+        assert pv["target_id"] == "e1" and pv["latex"] == "x^2"
+        # ...and a missing/null latex (edit ended without save) relays as None
+        ws.send_json({"type": "edit_preview", "target_id": "e1"})
+        assert _drain_until(ws, "edit_preview")["latex"] is None
+
+        # DocState untouched by previews: e1 still "a", next append gets e2
+        ws.send_json({"type": "utterance", "text": "b"})
+        p2 = _drain_until(ws, "proposal")
+        ws.send_json({"type": "resolve",
+                      "pending_id": p2["pending_id"], "verdict": "commit"})
+        applied = _drain_until(ws, "applied")
+        assert applied["doc_context"] == "[e1] a  [e2] b"
+
+    # previews never become training records: only the two commits are logged
+    session = next(Path("data/sessions").iterdir())      # conftest chdir'd to tmp
+    assert len(list(session.glob("*.json"))) == 2

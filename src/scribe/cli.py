@@ -48,6 +48,9 @@ def main():
                    help="backend owns the microphone: VAD-chunked utterances feed the engine")
     s.add_argument("--mic-device", type=int, default=None,
                    help="input device index (see `scribe mics`); default: system default")
+    s.add_argument("--start-unmuted", action="store_true",
+                   help="mic mode starts listening immediately instead of "
+                        "muted-until-'hey Jarvis' (the wake intent)")
     s.add_argument("--wakeword-model", action="append", default=None,
         metavar="PATH=INTENT",
         help="spotter model mapping, repeatable (e.g. models/commit.onnx=commit); "
@@ -70,7 +73,8 @@ def main():
         if args.wakeword_model:
             ww = dict(spec.split("=", 1) for spec in args.wakeword_model)
         uvicorn.run(build_app(engine_name=args.engine, mic=args.mic,
-                              wakeword_models=ww, mic_device=args.mic_device),
+                              wakeword_models=ww, mic_device=args.mic_device,
+                              start_unmuted=args.start_unmuted),
                     host="127.0.0.1", port=args.port)
     elif args.cmd == "bench":
         from .bench import print_summary, run_bench

@@ -34,10 +34,13 @@ def make_engine(name: str):
 
 def build_app(engine_name: str = "mock", mic: bool = False,
               wakeword_models: dict[str, str] | None = None,
-              mic_device: int | None = None) -> FastAPI:
+              mic_device: int | None = None,
+              start_unmuted: bool = False) -> FastAPI:
     """wakeword_models: {model_path_or_name: intent} for the Phase 5 spotters
     (requires mic=True). None -> auto-load DEFAULT_MODELS paths that exist.
-    mic_device: input device index (None = system default)."""
+    mic_device: input device index (None = system default).
+    start_unmuted: skip the wake-on-wake-word gate — mic mode normally starts
+    muted until "hey Jarvis" / the UI unmute button fires a `wake` intent."""
     app = FastAPI(title="GemmaApollo Scribe")
     engine = make_engine(engine_name)
     doc = DocState()
@@ -49,6 +52,12 @@ def build_app(engine_name: str = "mock", mic: bool = False,
     # the file; tests stub these). Keys: list / select / set_testing.
     micctl: dict = {}
     app.state.micctl = micctl
+    # Mic gate (wake-on-wake-word): while muted, VAD/spotters keep running but
+    # dictation never reaches the engine. `wake`/`mute` intents flip it.
+    mute = {"on": mic and not start_unmuted}
+
+    def mic_state() -> str:
+        return ("muted" if mute["on"] else "listening") if mic else "idle"
 
     # ------------------------------------------------------------ transport
     async def send(ws: WebSocket, obj: dict):
@@ -210,13 +219,16 @@ def build_app(engine_name: str = "mock", mic: bool = False,
             pending[pid] = {"action": a, "transcript": segment["text"],
                             "segments": [segment]}
             await broadcast_proposal(pid)
-        await broadcast({"type": "status",
-                         "state": "listening" if mic else "idle"})
+        await broadcast({"type": "status", "state": mic_state()})
 
     # ------------------------------------------------------------ intents
     async def handle_intent(name: str, source: str = "ui"):
         """App-layer intents — UI buttons and wake-word spotters share this
         exact path. Never engine Actions."""
+        if name in ("wake", "mute"):
+            # Flip the gate BEFORE the status broadcast so it reports the
+            # new state ("hey Jarvis" -> listening, UI mute -> muted).
+            mute["on"] = name == "mute"
         if source == "wakeword":
             # PLAN.md Phase 5: log every spotter fire (false-positive audit).
             logger.log(audio_bytes=None, doc_context=doc.render_context(),
@@ -224,9 +236,11 @@ def build_app(engine_name: str = "mock", mic: bool = False,
                        engine_action={"intent": name, "source": source},
                        final_action=None, verdict="app_intent",
                        engine=engine.name, latency_ms={})
-            await broadcast({"type": "status",
-                             "state": "listening" if mic else "idle",
+            await broadcast({"type": "status", "state": mic_state(),
                              "detail": f"wakeword: {name}"})
+        elif name in ("wake", "mute"):
+            await broadcast({"type": "status", "state": mic_state(),
+                             "detail": "muted" if mute["on"] else "unmuted"})
         if name == "undo":
             if doc.undo():
                 await broadcast({"type": "applied",
@@ -259,6 +273,14 @@ def build_app(engine_name: str = "mock", mic: bool = False,
             await apply_and_broadcast(a, "committed", source="keyboard")
             # TODO(Phase 6): edited_after gold-label linkage.
 
+        elif t == "edit_preview":
+            # Transient editor keystrokes: relay only. Never touches DocState,
+            # history, or the datalogger — `applied` on save is the real
+            # mutation. latex=None means the edit ended without saving.
+            await broadcast({"type": "edit_preview",
+                             "target_id": msg["target_id"],
+                             "latex": msg.get("latex")})
+
         elif t == "mic":
             # Device selection + tester (see PROTOCOL.md). No-op frames when
             # the server runs without --mic.
@@ -273,19 +295,18 @@ def build_app(engine_name: str = "mock", mic: bool = False,
                 await micctl["select"](int(msg["device"]))
             elif action == "test_start":
                 micctl["set_testing"](True)
-                await broadcast({"type": "status", "state": "listening",
+                await broadcast({"type": "status", "state": mic_state(),
                                  "detail": "mic test on"})
             elif action == "test_stop":
                 micctl["set_testing"](False)
-                await broadcast({"type": "status", "state": "listening",
+                await broadcast({"type": "status", "state": mic_state(),
                                  "detail": "mic test off"})
 
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket):
         await ws.accept()
         clients.add(ws)
-        await send(ws, {"type": "status",
-                        "state": "listening" if mic else "idle",
+        await send(ws, {"type": "status", "state": mic_state(),
                         "detail": f"engine={engine.name}"})
         if micctl:
             try:
@@ -333,8 +354,11 @@ def build_app(engine_name: str = "mock", mic: bool = False,
                 from .audio.wakewords import DEFAULT_MODELS, OWWScorer
                 mapping = wakeword_models
                 if mapping is None:
+                    # Custom models only when trained; bare pretrained names
+                    # (no path separator, e.g. hey_jarvis_v0.1) always pass —
+                    # OWWScorer resolves/downloads them lazily.
                     mapping = {p: intent for intent, p in DEFAULT_MODELS.items()
-                               if P(p).exists()}
+                               if P(p).exists() or "/" not in p}
                 if not mapping:
                     print("wakewords: no models found — spotters disabled "
                           "(train with tools/wakewords/)", flush=True)
@@ -351,17 +375,27 @@ def build_app(engine_name: str = "mock", mic: bool = False,
                     chunker = UtteranceChunker(is_speech=vad)
                     spotter = (IntentSpotter(score=state["scorer"])
                                if state["scorer"] else None)
+                    was_muted = mute["on"]
                     for i, frame in enumerate(mic_frames(device, stop=stop)):
                         prob = vad(frame)
                         # Spotters see every frame, in parallel with the VAD —
                         # a hit bypasses the engine entirely (app intent).
+                        # They run while muted too: "hey Jarvis" must wake,
+                        # and commit/undo/scratch stay active by design.
                         if spotter is not None:
                             hit = spotter.feed(frame)
                             if hit:
                                 loop.call_soon_threadsafe(intents.put_nowait, hit)
-                        u = chunker.feed(frame, prob=prob)
-                        if u is not None:
-                            loop.call_soon_threadsafe(utterances.put_nowait, u)
+                        # Mute gates dictation only: while muted the chunker is
+                        # starved, and a half-captured utterance is dropped.
+                        if mute["on"] != was_muted:
+                            was_muted = mute["on"]
+                            if was_muted:
+                                chunker.reset()
+                        if not mute["on"]:
+                            u = chunker.feed(frame, prob=prob)
+                            if u is not None:
+                                loop.call_soon_threadsafe(utterances.put_nowait, u)
                         if state["testing"] and i % 3 == 0:  # ~10 Hz
                             rms = float(np.sqrt(float((frame ** 2).mean())))
                             loop.call_soon_threadsafe(
@@ -413,6 +447,8 @@ def build_app(engine_name: str = "mock", mic: bool = False,
             async def consume_utterances():
                 while True:
                     u = await utterances.get()
+                    if mute["on"]:
+                        continue  # muted while this one was already queued
                     await broadcast({"type": "status", "state": "heard",
                                      "detail": f"utterance {len(u)/16000:.1f}s"})
                     await process_utterance(audio=u)

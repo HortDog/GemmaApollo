@@ -64,6 +64,15 @@ class UtteranceChunker:
     def __post_init__(self):
         self._preroll = deque(maxlen=max(1, int(self.pad_ms / FRAME_MS)))
 
+    def reset(self):
+        """Drop any partially-captured utterance and pre-roll (used when the
+        mic is muted mid-utterance — nothing captured so far may leak out)."""
+        self._frames = []
+        self._active = False
+        self._silence_ms = 0.0
+        self._speech_ms = 0.0
+        self._preroll.clear()
+
     def _close(self) -> Optional[np.ndarray]:
         pcm = np.concatenate(self._frames) if self._frames else None
         # min_s gates on actual SPEECH duration — pre-roll and trailing
