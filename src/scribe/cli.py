@@ -103,6 +103,22 @@ def main():
     if args.cmd == "serve":
         import os
 
+        # The app tier only does tiny linear algebra — and OpenBLAS's
+        # multi-threaded DllMain init is what deadlocks below.
+        os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+        # Pre-import the heavy audio deps while the process is still
+        # single-threaded. Lazily importing them later (mic claim, drain
+        # thread) deadlocks on Windows when the parentwatch stdin thread
+        # exists: numpy's OpenBLAS DLL init blocks forever inside the
+        # loader lock (native stack: LoadLibraryExW -> DllMain ->
+        # RtlSleepConditionVariableCS), freezing the event loop.
+        try:
+            import numpy  # noqa: F401
+            import onnxruntime  # noqa: F401
+            import openwakeword  # noqa: F401
+        except ImportError:
+            pass  # mock-only installs run without the audio extra
+
         import uvicorn
 
         from .server import build_app

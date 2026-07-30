@@ -481,6 +481,8 @@ async function onMicGranted(){
   try{
     await startMicCapture();
   }catch(err){
+    // loud failure: the status strip is what people actually look at
+    setVoiceState('idle', 'mic failed: ' + err.message);
     log({action:'mic_stream'}, 'discarded', 'mic failed: ' + err.message);
     wsSend({type:'mic_stream', action:'stop'});   // give the claim back
     resetMicBtn();
@@ -547,13 +549,24 @@ document.getElementById('mictest').onclick = ()=>{
   }
 };
 
+// Auto-reconnect: a server restart must never leave a silently dead tab —
+// local mode covers the gap, and the server re-seeds the doc on reconnect.
+let reconnectTimer = null;
+let reconnectDelay = 1000;
+function scheduleReconnect(){
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(connectWs, reconnectDelay);
+  reconnectDelay = Math.min(reconnectDelay * 2, 10000);
+}
+
 function connectWs(){
   try{
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
     ws = new WebSocket(`${scheme}://${location.host}/ws`);
-  }catch(e){ setNet(false); return; }
+  }catch(e){ setNet(false); scheduleReconnect(); return; }
   ws.onopen = ()=>{
     setNet(true);
+    reconnectDelay = 1000;
     // Browser-mic entry point; hidden again if a `mics` frame reveals the
     // server owns a sounddevice mic (--mic mode).
     document.getElementById('micbtn').style.display = '';
@@ -575,7 +588,8 @@ function connectWs(){
     previews = {};
     micTesting = false;
     document.getElementById('mictest').textContent = 'test mic';
-    log({action:'ws_closed', note:'local fallback'}, 'info');
+    log({action:'ws_closed', note:'local fallback; retrying connection'}, 'info');
+    scheduleReconnect();
   };
   ws.onerror = ()=>{ setNet(false); };
 }
