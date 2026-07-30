@@ -58,6 +58,32 @@ admin). First launch: menu **Scribe → Model server…** → set
 `http://<gpu-box>:8018`, then **Start mic** in the UI. Windows may need
 Settings → Privacy → Microphone → "let desktop apps access" enabled.
 
+### Build tooling and `npm audit`
+
+**Never run `npm audit fix --force` in `desktop/`.** npm is allowed to resolve
+advisories by moving versions *backwards*: it once downgraded electron-builder
+26.15.3 → 22.14.13, which took findings from 16 to 19 and introduced
+[GHSA-r4pf-3v7r-hh55](https://github.com/advisories/GHSA-r4pf-3v7r-hh55) —
+arbitrary code execution via the **NSIS installer on Windows**, precisely the
+installer this project ships. npm still suggests electron-builder@25.1.8 as a
+"fix", which is also a downgrade. Treat its automated advice here as untrusted.
+
+Everything in this tree is a build-time `devDependency`; none of it is bundled
+into the app, so findings are about your build machine, not about users. The
+right moves are to keep electron-builder moving *forward*
+(`npm install --save-dev electron-builder@latest`) and to pin transitive fixes
+with `overrides` — the `brace-expansion` override in `desktop/package.json`
+clears the remaining advisory and is verified by the build below.
+
+After any dependency change, re-verify the whole packaging path rather than
+assuming — the smoke test boots the frozen sidecar and loads the renderer:
+
+```powershell
+cd desktop; npm ci; npm run dist
+Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
+$env:SCRIBE_SMOKE = "1"; & ".\dist\win-unpacked\GemmaApollo Scribe.exe"   # expect: SMOKE OK port=<n>
+```
+
 Client state lives in `%LOCALAPPDATA%\GemmaApolloScribe\` (local training
 rows + spool, `client_id`) and `%APPDATA%\gemmapollo-scribe-desktop\`
 (settings.json). Rows upload to the GPU box automatically and move to

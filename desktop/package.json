@@ -12,6 +12,9 @@
     "electron": "^43.2.0",
     "electron-builder": "^26.15.3"
   },
+  "overrides": {
+    "brace-expansion": "^5.0.9"
+  },
   "build": {
     "appId": "com.gemmapollo.scribe",
     "productName": "GemmaApollo Scribe",
