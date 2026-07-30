@@ -5,9 +5,36 @@
   "description": "Desktop shell for the GemmaApollo math scribe (Electron + Python sidecar)",
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "dist": "electron-builder --win nsis"
   },
   "devDependencies": {
-    "electron": "^43.2.0"
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.gemmapollo.scribe",
+    "productName": "GemmaApollo Scribe",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "settings.html"
+    ],
+    "extraResources": [
+      {
+        "from": "../tools/build/dist/scribe-server",
+        "to": "scribe-server"
+      }
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false
+    }
   }
 }

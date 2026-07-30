@@ -34,11 +34,14 @@ def build_app(engine_name: str = "mock", mic: bool = False,
     muted until "hey Jarvis" / the UI unmute button fires a `wake` intent.
     model_server_url: remote-engine target; when set, datalogger rows also
     mirror to its central /log store (local files always written first)."""
+    from .paths import data_root
     app = FastAPI(title="GemmaApollo Scribe")
     engine = make_engine(engine_name, model_server_url)
     doc = DocState()
-    logger = (SpoolingLogger(model_server_url.rstrip("/") + "/log")
-              if model_server_url else SessionLogger())
+    sessions = data_root() / "data" / "sessions"
+    logger = (SpoolingLogger(model_server_url.rstrip("/") + "/log",
+                             root=sessions)
+              if model_server_url else SessionLogger(sessions))
     clients: set[WebSocket] = set()
     pending: dict = {}  # pending_id -> {"action", "transcript", "audio_wav"}
     counter = {"n": 0}
@@ -477,13 +480,22 @@ def build_app(engine_name: str = "mock", mic: bool = False,
             from pathlib import Path as P
 
             from .audio.wakewords import DEFAULT_MODELS, OWWScorer
+            from .paths import resource_root
             mapping = wakeword_models
             if mapping is None:
                 # Custom models only when trained; bare pretrained names
                 # (no path separator, e.g. hey_jarvis_v0.1) always pass —
-                # OWWScorer resolves/downloads them lazily.
-                mapping = {p: intent for intent, p in DEFAULT_MODELS.items()
-                           if P(p).exists() or "/" not in p}
+                # OWWScorer resolves/downloads them lazily. Paths resolve
+                # CWD-first, then the bundle/repo root (frozen sidecar).
+                mapping = {}
+                for intent, p in DEFAULT_MODELS.items():
+                    for cand in (P(p), resource_root() / p):
+                        if cand.exists():
+                            mapping[str(cand)] = intent
+                            break
+                    else:
+                        if "/" not in p:
+                            mapping[p] = intent
             if not mapping:
                 print("wakewords: no models found — spotters disabled "
                       "(train with tools/wakewords/)", flush=True)
@@ -603,6 +615,7 @@ def build_app(engine_name: str = "mock", mic: bool = False,
 
             start_capture(mic_device)
 
-    app.mount("/", StaticFiles(directory=Path(__file__).resolve()
-              .parents[2] / "frontend", html=True), name="frontend")
+    from .paths import resource_root
+    app.mount("/", StaticFiles(directory=resource_root() / "frontend",
+                               html=True), name="frontend")
     return app

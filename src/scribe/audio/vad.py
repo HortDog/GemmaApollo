@@ -133,13 +133,15 @@ _VAD_CONTEXT = 64                            # v5 leading context @16 kHz
 
 
 def _vad_model_path() -> "Path":
-    """CWD-relative first (matches wakewords convention), repo-root fallback
-    so `scribe mic-test` etc. work from any directory."""
+    """CWD-relative first (matches wakewords convention), then the repo /
+    frozen-bundle root so any launch directory works."""
     from pathlib import Path
+
+    from ..paths import resource_root
     p = Path(VAD_MODEL)
     if p.exists():
         return p
-    return Path(__file__).resolve().parents[3] / VAD_MODEL
+    return resource_root() / VAD_MODEL
 
 
 class SileroVAD:

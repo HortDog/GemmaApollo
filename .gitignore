@@ -9,3 +9,8 @@ data/
 
 # model caches if pointed locally
 .cache/
+
+# frozen-sidecar build artifacts (stage 6)
+tools/build/.venv-freeze/
+tools/build/dist/
+tools/build/work/
