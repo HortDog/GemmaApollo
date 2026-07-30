@@ -44,6 +44,9 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("serve"); s.add_argument("--engine", default="mock",
         choices=["mock", "s2l", "gemma"]); s.add_argument("--port", type=int, default=8017)
+    s.add_argument("--host", default="127.0.0.1",
+                   help="bind address (default loopback; the Electron shell "
+                        "and tailscale serve both proxy to loopback)")
     s.add_argument("--mic", action="store_true",
                    help="backend owns the microphone: VAD-chunked utterances feed the engine")
     s.add_argument("--mic-device", type=int, default=None,
@@ -75,7 +78,7 @@ def main():
         uvicorn.run(build_app(engine_name=args.engine, mic=args.mic,
                               wakeword_models=ww, mic_device=args.mic_device,
                               start_unmuted=args.start_unmuted),
-                    host="127.0.0.1", port=args.port)
+                    host=args.host, port=args.port)
     elif args.cmd == "bench":
         from .bench import print_summary, run_bench
         print_summary(run_bench(args.engine, asr_model=args.asr_model))
