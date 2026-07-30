@@ -18,7 +18,7 @@ function Step($desc, $block) {
 }
 
 $venv = "tools/build/.venv-freeze"
-Step "create freeze venv"    { uv venv $venv --python 3.12 }
+Step "create freeze venv"    { uv venv $venv --python 3.12 --clear }
 Step "install app tier"      { uv pip install --python "$venv/Scripts/python.exe" ".[audio]" pyinstaller }
 Step "pyinstaller"           { & "$venv/Scripts/pyinstaller.exe" tools/build/scribe-server.spec `
                                    --noconfirm --distpath tools/build/dist --workpath tools/build/work }
