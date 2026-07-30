@@ -4,13 +4,14 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>GemmaApollo Scribe — UI Prototype</title>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/mathquill/0.10.1/mathquill.min.css">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Spectral:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/mathquill/0.10.1/mathquill.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+<!-- all assets vendored (frontend/vendor/): the UI must render with zero
+     internet egress — Electron app + tailnet-without-internet clients -->
+<link rel="stylesheet" href="vendor/katex/katex.min.css">
+<link rel="stylesheet" href="vendor/mathquill/mathquill.min.css">
+<link rel="stylesheet" href="vendor/fonts/fonts.css">
+<script src="vendor/jquery/jquery.min.js"></script>
+<script src="vendor/mathquill/mathquill.min.js"></script>
+<script src="vendor/katex/katex.min.js"></script>
 <style>
   :root{
     --paper:#F4F6F2; --grid:#E2E8DF; --ink:#1C2B33; --ink-soft:#5C6B70;
