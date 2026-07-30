@@ -36,6 +36,19 @@ def wav_bytes(pcm: np.ndarray, sample_rate: int = SAMPLE_RATE) -> bytes:
     return buf.getvalue()
 
 
+def wav_to_float32(data: bytes) -> np.ndarray:
+    """Complete wav file bytes -> float32 [-1,1] mono. Strict: the 16 kHz /
+    mono / 16-bit invariant is VALIDATED, never resampled — a mismatched wav
+    on the model-server hop is a caller bug, not something to paper over."""
+    with wave.open(io.BytesIO(data)) as w:
+        got = (w.getframerate(), w.getnchannels(), w.getsampwidth())
+        if got != (SAMPLE_RATE, 1, 2):
+            raise ValueError(f"expected {SAMPLE_RATE} Hz mono 16-bit wav, got "
+                             f"{got[0]} Hz {got[1]}ch {got[2] * 8}-bit")
+        pcm = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2")
+    return pcm.astype(np.float32) / 32768.0
+
+
 @dataclass
 class UtteranceChunker:
     """Turns a stream of fixed-size frames + speech probabilities into

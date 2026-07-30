@@ -9,6 +9,7 @@ dependencies = [
   "pydantic>=2.6",
   "websockets>=12",
   "numpy>=1.26",  # audio arrays are a wire type (chunker, wav encode) — keep pure-logic testable
+  "httpx>=0.27",  # RemoteEngine + SpoolingLogger (app->model-server hop)
 ]
 
 [project.optional-dependencies]

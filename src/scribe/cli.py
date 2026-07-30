@@ -43,10 +43,13 @@ def main():
     p = argparse.ArgumentParser(prog="scribe")
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("serve"); s.add_argument("--engine", default="mock",
-        choices=["mock", "s2l", "gemma"]); s.add_argument("--port", type=int, default=8017)
+        choices=["mock", "s2l", "gemma", "remote"]); s.add_argument("--port", type=int, default=8017)
     s.add_argument("--host", default="127.0.0.1",
                    help="bind address (default loopback; the Electron shell "
                         "and tailscale serve both proxy to loopback)")
+    s.add_argument("--model-server-url", default="http://127.0.0.1:8018",
+                   help="inference service for --engine remote; datalogger "
+                        "rows also mirror to its central /log store")
     s.add_argument("--mic", action="store_true",
                    help="backend owns the microphone: VAD-chunked utterances feed the engine")
     s.add_argument("--mic-device", type=int, default=None,
@@ -58,6 +61,16 @@ def main():
         metavar="PATH=INTENT",
         help="spotter model mapping, repeatable (e.g. models/commit.onnx=commit); "
              "default: auto-load models/wakewords/* if present")
+    m = sub.add_parser("model-server",
+        help="Engine-over-HTTP inference service + central /log dataset store")
+    m.add_argument("--engine", default="s2l", choices=["mock", "s2l", "gemma"])
+    m.add_argument("--host", default="127.0.0.1",
+                   help="bind address (Tailscale 100.x IP for cross-machine "
+                        "use; 0.0.0.0 inside Docker)")
+    m.add_argument("--port", type=int, default=8018)
+    m.add_argument("--preload", action="store_true",
+                   help="load models before serving traffic (otherwise the "
+                        "first utterance waits out the lazy load)")
     b = sub.add_parser("bench"); b.add_argument("--engine", default="s2l",
         choices=["mock", "s2l"]); b.add_argument("--asr-model", default=None,
         help="override whisper model: large-v3 | large-v3-turbo | distil-large-v3")
@@ -77,8 +90,21 @@ def main():
             ww = dict(spec.split("=", 1) for spec in args.wakeword_model)
         uvicorn.run(build_app(engine_name=args.engine, mic=args.mic,
                               wakeword_models=ww, mic_device=args.mic_device,
-                              start_unmuted=args.start_unmuted),
+                              start_unmuted=args.start_unmuted,
+                              model_server_url=(args.model_server_url
+                                                if args.engine == "remote"
+                                                else None)),
                     host=args.host, port=args.port)
+    elif args.cmd == "model-server":
+        import uvicorn
+
+        from .model_server import build_model_app
+        app = build_model_app(args.engine)
+        if args.preload:
+            print(f"preloading engine '{args.engine}'...", flush=True)
+            app.state.warmup()
+            print("engine ready", flush=True)
+        uvicorn.run(app, host=args.host, port=args.port)
     elif args.cmd == "bench":
         from .bench import print_summary, run_bench
         print_summary(run_bench(args.engine, asr_model=args.asr_model))

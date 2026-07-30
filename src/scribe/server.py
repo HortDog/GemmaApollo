@@ -15,37 +15,30 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from pydantic import TypeAdapter
 
-from .datalogger import SessionLogger
+from .datalogger import SessionLogger, SpoolingLogger
 from .docstate import DocState
+from .engine import make_engine  # re-export: bench.py imports it from here
 from .engine.base import Action, Clarify, TextReply
-from .engine.mock_engine import MockEngine
 
 ACTION_ADAPTER = TypeAdapter(Action)
-
-def make_engine(name: str):
-    if name == "mock":
-        return MockEngine()
-    if name == "s2l":
-        from .engine.s2l_engine import S2LEngine
-        return S2LEngine()
-    if name == "gemma":
-        from .engine.gemma_engine import GemmaEngine
-        return GemmaEngine()
-    raise ValueError(name)
 
 def build_app(engine_name: str = "mock", mic: bool = False,
               wakeword_models: dict[str, str] | None = None,
               mic_device: int | None = None,
-              start_unmuted: bool = False) -> FastAPI:
+              start_unmuted: bool = False,
+              model_server_url: str | None = None) -> FastAPI:
     """wakeword_models: {model_path_or_name: intent} for the Phase 5 spotters
     (requires mic=True). None -> auto-load DEFAULT_MODELS paths that exist.
     mic_device: input device index (None = system default).
     start_unmuted: skip the wake-on-wake-word gate — mic mode normally starts
-    muted until "hey Jarvis" / the UI unmute button fires a `wake` intent."""
+    muted until "hey Jarvis" / the UI unmute button fires a `wake` intent.
+    model_server_url: remote-engine target; when set, datalogger rows also
+    mirror to its central /log store (local files always written first)."""
     app = FastAPI(title="GemmaApollo Scribe")
-    engine = make_engine(engine_name)
+    engine = make_engine(engine_name, model_server_url)
     doc = DocState()
-    logger = SessionLogger()
+    logger = (SpoolingLogger(model_server_url.rstrip("/") + "/log")
+              if model_server_url else SessionLogger())
     clients: set[WebSocket] = set()
     pending: dict = {}  # pending_id -> {"action", "transcript", "audio_wav"}
     counter = {"n": 0}

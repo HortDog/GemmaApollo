@@ -440,6 +440,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "pydantic" },
@@ -471,6 +472,7 @@ s2l = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.110" },
     { name = "faster-whisper", marker = "extra == 's2l'", specifier = ">=1.0" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "jiwer", marker = "extra == 'eval'" },
     { name = "numpy", specifier = ">=1.26" },
