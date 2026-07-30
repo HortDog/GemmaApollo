@@ -1,5 +1,24 @@
-"""CLI entry: scribe serve | bench | mics | mic-test | eval | export."""
+"""CLI entry: scribe serve | model-server | bench | mics | mic-test | eval | export."""
 import argparse
+
+
+def _watch_parent_stdin():
+    """Orphan guard for the Electron shell (SCRIBE_PARENT_WATCH=1): the
+    parent holds our stdin pipe, so EOF means it died or wants us gone —
+    exit instead of lingering as a headless server."""
+    import os
+    import sys
+    import threading
+
+    def watch():
+        try:
+            while sys.stdin.buffer.read(4096):
+                pass
+        except Exception:
+            pass
+        os._exit(0)
+
+    threading.Thread(target=watch, daemon=True, name="parentwatch").start()
 
 
 def _mic_test(device: int | None, seconds: float):
@@ -82,9 +101,13 @@ def main():
     sub.add_parser("export")
     args = p.parse_args()
     if args.cmd == "serve":
+        import os
+
         import uvicorn
 
         from .server import build_app
+        if os.environ.get("SCRIBE_PARENT_WATCH"):
+            _watch_parent_stdin()
         ww = None
         if args.wakeword_model:
             ww = dict(spec.split("=", 1) for spec in args.wakeword_model)

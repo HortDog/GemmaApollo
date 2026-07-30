@@ -1,0 +1,7 @@
+# Whitelist: the model-server image needs only the package + lockfile.
+# Everything else (multi-GB .venv, dataset, vendored frontend, models) must
+# never enter the build context.
+*
+!pyproject.toml
+!uv.lock
+!src

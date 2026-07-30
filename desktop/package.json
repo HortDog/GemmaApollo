@@ -1,0 +1,13 @@
+{
+  "name": "gemmapollo-scribe-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop shell for the GemmaApollo math scribe (Electron + Python sidecar)",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^43.2.0"
+  }
+}

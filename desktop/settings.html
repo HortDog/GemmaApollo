@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Scribe settings</title>
+<style>
+  body{font-family:system-ui,sans-serif;margin:18px;color:#1C2B33;background:#F4F6F2}
+  label{display:block;font-size:.85rem;margin-bottom:6px}
+  input{width:100%;box-sizing:border-box;padding:8px;font-family:monospace;font-size:.85rem;
+        border:1px solid #D8DFDB;border-radius:3px}
+  .row{margin-top:14px;display:flex;gap:8px;align-items:center}
+  button{padding:7px 14px;font-size:.8rem;cursor:pointer;border:1px solid #1C2B33;
+         background:#2E6E6A;border-color:#2E6E6A;color:#fff;border-radius:3px}
+  #status{font-size:.75rem;color:#5C6B70}
+  .hint{font-size:.72rem;color:#5C6B70;margin-top:6px}
+</style>
+</head>
+<body>
+  <label for="url">Model server URL
+    <input id="url" type="text" spellcheck="false" placeholder="http://gpu-box:8018">
+  </label>
+  <div class="hint">The GPU box running <code>scribe model-server</code> (or its Docker
+  container) — e.g. <code>http://&lt;machine&gt;.&lt;tailnet&gt;.ts.net:8018</code>.
+  Saving restarts the local scribe server.</div>
+  <div class="row">
+    <button id="save">Save &amp; restart</button>
+    <span id="status"></span>
+  </div>
+<script>
+  const url = document.getElementById('url');
+  const status = document.getElementById('status');
+  window.scribeSettings.get().then(s => { url.value = s.modelServerUrl; });
+  document.getElementById('save').onclick = async () => {
+    status.textContent = 'restarting scribe server…';
+    try {
+      await window.scribeSettings.set({ modelServerUrl: url.value.trim() });
+      status.textContent = 'saved';
+      setTimeout(() => window.close(), 600);
+    } catch (e) {
+      status.textContent = 'failed: ' + e;
+    }
+  };
+</script>
+</body>
+</html>

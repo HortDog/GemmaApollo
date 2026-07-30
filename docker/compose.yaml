@@ -1,0 +1,21 @@
+# GPU-box model server. Host prereqs (Windows 11): Docker Desktop with the
+# WSL2 backend + a current NVIDIA driver (the container toolkit is built in).
+#   docker compose -f docker/compose.yaml up --build -d
+# Tailnet clients reach it at http://<gpu-box-magicdns-name>:8018 — the host
+# port publish exposes it on the host's Tailscale address. Never expose this
+# beyond the tailnet (no router port-forwards, no tailscale funnel).
+services:
+  model-server:
+    build:
+      context: ..
+      dockerfile: docker/model-server.Dockerfile
+    ports:
+      - "8018:8018"
+    gpus: all
+    volumes:
+      - hf-cache:/root/.cache/huggingface   # Whisper/Qwen weights, keep across rebuilds
+      - ../data/sessions:/app/data/sessions # central GemmaApollo dataset lives on the host
+    restart: unless-stopped
+
+volumes:
+  hf-cache:
