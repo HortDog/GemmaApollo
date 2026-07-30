@@ -21,11 +21,12 @@ s2l = [
   "torch>=2.7",
 ]
 audio = [
-  # Phase 4 + 5
+  # Phase 4 + 5. Torch-free by design: the frozen desktop sidecar ships this
+  # extra, and Silero VAD runs the vendored models/vad/silero_vad.onnx
+  # directly on onnxruntime (the silero-vad pip package hard-requires torch).
   "sounddevice>=0.5",
-  "silero-vad>=5.1",
   "openwakeword>=0.6",
-  "onnxruntime>=1.17",  # oww inference backend on Windows (no tflite-runtime wheels)
+  "onnxruntime>=1.17",  # VAD + oww inference (no tflite-runtime wheels on Windows)
 ]
 eval = ["sympy", "jiwer"]
 dev = ["pytest>=8", "httpx>=0.27"]  # httpx: starlette TestClient ws round-trip tests

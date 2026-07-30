@@ -3,8 +3,8 @@
 Layering (CLAUDE.md: pure logic stays torch-free):
 - UtteranceChunker: pure segmentation logic driven by an injected
   `is_speech(frame) -> prob` callable. Testable with a fake VAD.
-- SileroVAD: lazy torch wrapper providing that callable (32 ms / 512-sample
-  frames at 16 kHz — silero v5's required window).
+- SileroVAD: lazy onnxruntime wrapper providing that callable (32 ms /
+  512-sample frames at 16 kHz — silero v5's required window).
 - MicStream: lazy sounddevice wrapper yielding 512-sample float32 frames.
 - wav_bytes: float32 pcm -> 16-bit wav file bytes (for the datalogger).
 """
@@ -115,26 +115,65 @@ class UtteranceChunker:
         return None
 
 
-class SileroVAD:
-    """Lazy Silero VAD (torch) as an `is_speech(frame) -> prob` callable."""
+VAD_MODEL = "models/vad/silero_vad.onnx"     # vendored Silero v5 (MIT)
+_VAD_CONTEXT = 64                            # v5 leading context @16 kHz
 
-    def __init__(self):
-        self._model = None
+
+def _vad_model_path() -> "Path":
+    """CWD-relative first (matches wakewords convention), repo-root fallback
+    so `scribe mic-test` etc. work from any directory."""
+    from pathlib import Path
+    p = Path(VAD_MODEL)
+    if p.exists():
+        return p
+    return Path(__file__).resolve().parents[3] / VAD_MODEL
+
+
+class SileroVAD:
+    """Lazy Silero VAD v5 as an `is_speech(frame) -> prob` callable.
+
+    Runs the vendored onnx model directly on onnxruntime (CPU) instead of
+    the silero-vad pip package, which hard-requires torch — the app tier
+    (and the frozen desktop sidecar) must stay torch-free. Mirrors the
+    package's OnnxWrapper: 512-sample window, 64 samples of context carried
+    from the previous frame, LSTM state (2,1,128) threaded through.
+    """
+
+    def __init__(self, model_path=None):
+        self._path = model_path
+        self._sess = None
+        self._state = None
+        self._context = None
 
     def _load(self):
-        if self._model is None:
-            from silero_vad import load_silero_vad
-            self._model = load_silero_vad()   # small CPU model
-
-    def __call__(self, frame: np.ndarray) -> float:
-        self._load()
-        import torch
-        with torch.no_grad():
-            return float(self._model(torch.from_numpy(frame), SAMPLE_RATE).item())
+        if self._sess is None:
+            import onnxruntime as ort
+            opts = ort.SessionOptions()
+            opts.inter_op_num_threads = 1
+            opts.intra_op_num_threads = 1
+            self._sess = ort.InferenceSession(
+                str(self._path or _vad_model_path()), sess_options=opts,
+                providers=["CPUExecutionProvider"])
+            self.reset()
 
     def reset(self):
-        if self._model is not None:
-            self._model.reset_states()
+        if self._sess is not None:
+            self._state = np.zeros((2, 1, 128), dtype=np.float32)
+            self._context = np.zeros((1, _VAD_CONTEXT), dtype=np.float32)
+
+    def __call__(self, frame: np.ndarray) -> float:
+        if frame.size != FRAME_SAMPLES:
+            raise ValueError(f"expected {FRAME_SAMPLES}-sample frames, "
+                             f"got {frame.size}")
+        self._load()
+        x = np.concatenate(
+            [self._context, frame.reshape(1, -1).astype(np.float32)], axis=1)
+        # graph order is (output, stateN), same unpacking as silero's wrapper
+        out, self._state = self._sess.run(
+            None, {"input": x, "state": self._state,
+                   "sr": np.array(SAMPLE_RATE, dtype=np.int64)})
+        self._context = x[:, -_VAD_CONTEXT:]
+        return float(out[0, 0])
 
 
 def list_input_devices() -> list[dict]:
