@@ -128,8 +128,16 @@ def build_app(engine_name: str = "mock", mic: bool = False,
         """Re-run the engine's text path on the joined transcript so the
         post-corrector sees the whole equation, not glued fragments."""
         joined = joined_text(p)
-        merged = await asyncio.to_thread(engine.process_text, joined,
-                                         doc.render_context())
+        try:
+            merged = await asyncio.to_thread(engine.process_text, joined,
+                                             doc.render_context())
+        except Exception as e:
+            # Engine down (remote) or crashed: keep the previous latex — the
+            # composition survives and can still be committed or scratched.
+            await broadcast({"type": "error",
+                             "message": f"engine failed: {type(e).__name__}: {e}"})
+            p["transcript"] = joined
+            return
         if merged.action.action == "append_math":
             p["action"] = merged.action
         # else: joined text suddenly parses as a command — keep previous latex
@@ -188,12 +196,21 @@ def build_app(engine_name: str = "mock", mic: bool = False,
         """Shared pipeline for typed utterances (ws text box) and mic
         utterances (VAD chunker). Engine inference runs off the event loop."""
         await broadcast({"type": "status", "state": "thinking"})
-        if audio is not None:
-            res = await asyncio.to_thread(engine.process, audio,
-                                          engine_context())
-        else:
-            res = await asyncio.to_thread(engine.process_text, text,
-                                          engine_context())
+        try:
+            if audio is not None:
+                res = await asyncio.to_thread(engine.process, audio,
+                                              engine_context())
+            else:
+                res = await asyncio.to_thread(engine.process_text, text,
+                                              engine_context())
+        except Exception as e:
+            # Engine failure (remote model server down, model crash) must not
+            # kill the mic consumer task or the socket: report, drop the
+            # utterance, leave any pending composition intact.
+            await broadcast({"type": "error",
+                             "message": f"engine failed: {type(e).__name__}: {e}"})
+            await broadcast({"type": "status", "state": mic_state()})
+            return
         if res.transcript:
             await broadcast({"type": "transcript", "text": res.transcript,
                              "interim": False})
@@ -330,82 +347,113 @@ def build_app(engine_name: str = "mock", mic: bool = False,
         finally:
             clients.discard(ws)
 
+    # ---------------------------------------------------------------- audio hub
+    # Queues + Silero VAD + wake-word scorer + the consumer tasks bridging
+    # capture threads into the app layer. Built lazily on the event loop and
+    # shared by --mic capture and browser-mic ws streaming (PROTOCOL.md).
+    hub: dict = {}
+
+    def ensure_hub() -> dict:
+        if hub:
+            return hub
+        from .audio.vad import SileroVAD
+
+        loop = asyncio.get_running_loop()
+        utterances: asyncio.Queue = asyncio.Queue()
+        intents: asyncio.Queue = asyncio.Queue()
+        levels: asyncio.Queue = asyncio.Queue()
+
+        def make_scorer():
+            """Phase 5 wake-word scorer; None if no models available."""
+            from pathlib import Path as P
+
+            from .audio.wakewords import DEFAULT_MODELS, OWWScorer
+            mapping = wakeword_models
+            if mapping is None:
+                # Custom models only when trained; bare pretrained names
+                # (no path separator, e.g. hey_jarvis_v0.1) always pass —
+                # OWWScorer resolves/downloads them lazily.
+                mapping = {p: intent for intent, p in DEFAULT_MODELS.items()
+                           if P(p).exists() or "/" not in p}
+            if not mapping:
+                print("wakewords: no models found — spotters disabled "
+                      "(train with tools/wakewords/)", flush=True)
+                return None
+            print(f"wakewords: spotting {list(mapping.values())}", flush=True)
+            return OWWScorer(mapping)
+
+        async def consume_utterances():
+            while True:
+                u = await utterances.get()
+                if mute["on"]:
+                    continue  # muted while this one was already queued
+                await broadcast({"type": "status", "state": "heard",
+                                 "detail": f"utterance {len(u)/16000:.1f}s"})
+                await process_utterance(audio=u)
+
+        async def consume_intents():
+            # Separate task so commit/undo work while the engine is busy.
+            while True:
+                name = await intents.get()
+                await handle_intent(name, source="wakeword")
+
+        async def consume_levels():
+            while True:
+                lvl = await levels.get()
+                await broadcast({"type": "miclevel", **lvl})
+
+        # Shared across device switches/streams: Silero + oww models load once.
+        hub.update(loop=loop, utterances=utterances, intents=intents,
+                   levels=levels, vad=SileroVAD(), scorer=make_scorer(),
+                   testing=False,
+                   tasks=[asyncio.create_task(consume_utterances()),
+                          asyncio.create_task(consume_intents()),
+                          asyncio.create_task(consume_levels())])
+        return hub
+
+    def make_pipeline():
+        """FramePipeline wired into the hub queues. One per capture source:
+        fresh chunker/spotter state per device switch or client stream."""
+        from .audio.pipeline import FramePipeline
+        from .audio.vad import UtteranceChunker
+        from .audio.wakewords import IntentSpotter
+        h, loop = hub, hub["loop"]
+        return FramePipeline(
+            vad=h["vad"],
+            chunker=UtteranceChunker(is_speech=h["vad"]),
+            spotter=(IntentSpotter(score=h["scorer"])
+                     if h["scorer"] else None),
+            is_muted=lambda: mute["on"],
+            is_testing=lambda: h["testing"],
+            on_utterance=lambda u: loop.call_soon_threadsafe(
+                h["utterances"].put_nowait, u),
+            on_intent=lambda n: loop.call_soon_threadsafe(
+                h["intents"].put_nowait, n),
+            on_level=lambda lvl: loop.call_soon_threadsafe(
+                h["levels"].put_nowait, lvl),
+        )
+
     # ------------------------------------------------------------ mic (Phase 4)
     if mic:
         @app.on_event("startup")
         async def start_mic():
-            import numpy as np
+            from .audio.vad import list_input_devices, mic_frames
 
-            from .audio.vad import SileroVAD, UtteranceChunker, list_input_devices, mic_frames
+            ensure_hub()
+            state = {"device": mic_device, "stop": None, "thread": None}
 
-            loop = asyncio.get_running_loop()
-            utterances: asyncio.Queue = asyncio.Queue()
-            intents: asyncio.Queue = asyncio.Queue()
-            levels: asyncio.Queue = asyncio.Queue()
-            # Shared across device switches: Silero + oww models load once.
-            vad = SileroVAD()
-            state = {"device": mic_device, "stop": None, "thread": None,
-                     "testing": False, "scorer": None}
-
-            def make_scorer():
-                """Phase 5 wake-word scorer; None if no models available."""
-                from pathlib import Path as P
-
-                from .audio.wakewords import DEFAULT_MODELS, OWWScorer
-                mapping = wakeword_models
-                if mapping is None:
-                    # Custom models only when trained; bare pretrained names
-                    # (no path separator, e.g. hey_jarvis_v0.1) always pass —
-                    # OWWScorer resolves/downloads them lazily.
-                    mapping = {p: intent for intent, p in DEFAULT_MODELS.items()
-                               if P(p).exists() or "/" not in p}
-                if not mapping:
-                    print("wakewords: no models found — spotters disabled "
-                          "(train with tools/wakewords/)", flush=True)
-                    return None
-                print(f"wakewords: spotting {list(mapping.values())}", flush=True)
-                return OWWScorer(mapping)
-
-            state["scorer"] = make_scorer()
-
-            def capture(device, stop):  # daemon thread: mic -> chunker|spotter|levels
-                from .audio.wakewords import IntentSpotter
+            def capture(device, stop):  # daemon thread: mic -> FramePipeline
                 try:
-                    vad.reset()  # don't carry VAD state across devices
-                    chunker = UtteranceChunker(is_speech=vad)
-                    spotter = (IntentSpotter(score=state["scorer"])
-                               if state["scorer"] else None)
-                    was_muted = mute["on"]
-                    for i, frame in enumerate(mic_frames(device, stop=stop)):
-                        prob = vad(frame)
-                        # Spotters see every frame, in parallel with the VAD —
-                        # a hit bypasses the engine entirely (app intent).
-                        # They run while muted too: "hey Jarvis" must wake,
-                        # and commit/undo/scratch stay active by design.
-                        if spotter is not None:
-                            hit = spotter.feed(frame)
-                            if hit:
-                                loop.call_soon_threadsafe(intents.put_nowait, hit)
-                        # Mute gates dictation only: while muted the chunker is
-                        # starved, and a half-captured utterance is dropped.
-                        if mute["on"] != was_muted:
-                            was_muted = mute["on"]
-                            if was_muted:
-                                chunker.reset()
-                        if not mute["on"]:
-                            u = chunker.feed(frame, prob=prob)
-                            if u is not None:
-                                loop.call_soon_threadsafe(utterances.put_nowait, u)
-                        if state["testing"] and i % 3 == 0:  # ~10 Hz
-                            rms = float(np.sqrt(float((frame ** 2).mean())))
-                            loop.call_soon_threadsafe(
-                                levels.put_nowait, {"rms": rms, "prob": prob})
+                    hub["vad"].reset()  # don't carry VAD state across devices
+                    pipeline = make_pipeline()
+                    for frame in mic_frames(device, stop=stop):
+                        pipeline.feed(frame)
                 except Exception as e:  # no input device, driver error, ...
                     msg = f"mic capture failed: {type(e).__name__}: {e}"
                     print(msg, flush=True)
                     asyncio.run_coroutine_threadsafe(
                         broadcast({"type": "status", "state": "idle",
-                                   "detail": msg}), loop)
+                                   "detail": msg}), hub["loop"])
 
             def start_capture(device):
                 stop = threading.Event()
@@ -442,32 +490,9 @@ def build_app(engine_name: str = "mock", mic: bool = False,
 
             micctl["list"] = mics_frame
             micctl["select"] = select
-            micctl["set_testing"] = lambda on: state.update(testing=on)
-
-            async def consume_utterances():
-                while True:
-                    u = await utterances.get()
-                    if mute["on"]:
-                        continue  # muted while this one was already queued
-                    await broadcast({"type": "status", "state": "heard",
-                                     "detail": f"utterance {len(u)/16000:.1f}s"})
-                    await process_utterance(audio=u)
-
-            async def consume_intents():
-                # Separate task so commit/undo work while the engine is busy.
-                while True:
-                    name = await intents.get()
-                    await handle_intent(name, source="wakeword")
-
-            async def consume_levels():
-                while True:
-                    lvl = await levels.get()
-                    await broadcast({"type": "miclevel", **lvl})
+            micctl["set_testing"] = lambda on: hub.update(testing=on)
 
             start_capture(mic_device)
-            asyncio.create_task(consume_utterances())
-            asyncio.create_task(consume_intents())
-            asyncio.create_task(consume_levels())
 
     app.mount("/", StaticFiles(directory=Path(__file__).resolve()
               .parents[2] / "frontend", html=True), name="frontend")
