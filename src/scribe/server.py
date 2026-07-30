@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import queue
 import threading
 from pathlib import Path
 
@@ -55,9 +56,14 @@ def build_app(engine_name: str = "mock", mic: bool = False,
     # Mic gate (wake-on-wake-word): while muted, VAD/spotters keep running but
     # dictation never reaches the engine. `wake`/`mute` intents flip it.
     mute = {"on": mic and not start_unmuted}
+    # Browser-mic streaming (PROTOCOL.md `mic_stream` + binary audio frames):
+    # at most one ws client streams at a time; --mic keeps sounddevice
+    # ownership and denies claims.
+    stream: dict = {"owner": None, "queue": None, "stop": None, "thread": None}
 
     def mic_state() -> str:
-        return ("muted" if mute["on"] else "listening") if mic else "idle"
+        live = mic or stream["owner"] is not None
+        return ("muted" if mute["on"] else "listening") if live else "idle"
 
     # ------------------------------------------------------------ transport
     async def send(ws: WebSocket, obj: dict):
@@ -271,6 +277,73 @@ def build_app(engine_name: str = "mock", mic: bool = False,
             pid = next(iter(pending))
             await resolve_pending(pid, "commit" if name == "commit" else "scratch")
 
+    # ------------------------------------------------------- browser mic stream
+    async def claim_stream(ws: WebSocket):
+        if mic:
+            await send(ws, {"type": "mic_stream", "state": "denied",
+                            "reason": "server owns the mic (--mic)"})
+            return
+        if stream["owner"] is ws:
+            await send(ws, {"type": "mic_stream", "state": "denied",
+                            "reason": "already streaming"})
+            return
+        if stream["owner"] is not None:
+            await send(ws, {"type": "mic_stream", "state": "denied",
+                            "reason": "another client is streaming"})
+            return
+        try:
+            import onnxruntime  # noqa: F401 — fail before granting, not mid-stream
+        except ImportError as e:
+            await send(ws, {"type": "error",
+                            "message": f"audio extras not installed: {e}"})
+            return
+        ensure_hub()
+        q: queue.Queue = queue.Queue(maxsize=256)
+        stop = threading.Event()
+
+        def drain():  # daemon thread: ws bytes -> reframer -> FramePipeline
+            from .audio.pipeline import PCMReframer
+            try:
+                hub["vad"].reset()  # don't carry VAD state across streams
+                reframer, pipeline = PCMReframer(), make_pipeline()
+                while not stop.is_set():
+                    try:
+                        data = q.get(timeout=0.25)
+                    except queue.Empty:
+                        continue
+                    for frame in reframer.feed(data):
+                        pipeline.feed(frame)
+                pipeline.reset()  # stream ended: drop any half-captured utterance
+            except Exception as e:  # model load failure, corrupt frames, ...
+                msg = f"mic stream failed: {type(e).__name__}: {e}"
+                print(msg, flush=True)
+                asyncio.run_coroutine_threadsafe(
+                    broadcast({"type": "error", "message": msg}), hub["loop"])
+
+        t = threading.Thread(target=drain, daemon=True, name="wsmic")
+        stream.update(owner=ws, queue=q, stop=stop, thread=t)
+        # Mirror --mic wake-word gating: the stream starts muted unless
+        # --start-unmuted. The client keeps sending audio while muted so the
+        # spotters still hear "hey Jarvis" / commit / undo / scratch.
+        mute["on"] = not start_unmuted
+        t.start()
+        await send(ws, {"type": "mic_stream", "state": "granted"})
+        await broadcast({"type": "status", "state": mic_state(),
+                         "detail": "browser mic claimed"})
+
+    async def release_stream(reason: str):
+        if stream["owner"] is None:
+            return
+        stop, t = stream["stop"], stream["thread"]
+        stream.update(owner=None, queue=None, stop=None, thread=None)
+        stop.set()
+        await asyncio.to_thread(t.join, 2)
+        mute["on"] = mic and not start_unmuted
+        await broadcast({"type": "mic_stream", "state": "released",
+                         "reason": reason})
+        await broadcast({"type": "status", "state": mic_state(),
+                         "detail": f"browser mic released ({reason})"})
+
     # ------------------------------------------------------------ dispatch
     async def dispatch(ws: WebSocket, msg: dict):
         """Handle one client frame (see PROTOCOL.md)."""
@@ -298,14 +371,29 @@ def build_app(engine_name: str = "mock", mic: bool = False,
                              "target_id": msg["target_id"],
                              "latex": msg.get("latex")})
 
+        elif t == "mic_stream":
+            # Browser-mic ownership (PROTOCOL.md): claim/release the right to
+            # send binary audio frames.
+            if msg.get("action") == "start":
+                await claim_stream(ws)
+            elif msg.get("action") == "stop" and stream["owner"] is ws:
+                await release_stream("stopped")
+
         elif t == "mic":
-            # Device selection + tester (see PROTOCOL.md). No-op frames when
-            # the server runs without --mic.
+            action = msg.get("action")
+            # The level tester works with any live hub (sounddevice OR a
+            # browser stream); list/select stay sounddevice-mode-only — a
+            # browser client picks its own device via enumerateDevices().
+            if action in ("test_start", "test_stop") and hub:
+                hub.update(testing=action == "test_start")
+                await broadcast({"type": "status", "state": mic_state(),
+                                 "detail": "mic test on" if hub["testing"]
+                                 else "mic test off"})
+                return
             if not micctl:
                 await send(ws, {"type": "error",
                                 "message": "mic mode is off (start with --mic)"})
                 return
-            action = msg.get("action")
             if action == "list":
                 await broadcast(await micctl["list"]())
             elif action == "select":
@@ -330,9 +418,30 @@ def build_app(engine_name: str = "mock", mic: bool = False,
                 await send(ws, await micctl["list"]())
             except Exception:
                 pass  # device enumeration failure must not block the session
+        warned_bytes = False  # at most one not-the-owner error per connection
         try:
             while True:
-                raw = await ws.receive_text()
+                msg = await ws.receive()
+                if msg["type"] == "websocket.disconnect":
+                    break
+                data = msg.get("bytes")
+                if data is not None:
+                    # Binary frames: s16le 16 kHz mono PCM from the stream
+                    # owner (PROTOCOL.md `audio`). Anyone else is ignored.
+                    if stream["owner"] is ws:
+                        try:
+                            stream["queue"].put_nowait(data)
+                        except queue.Full:
+                            pass  # consumer stalled: shed, like mic_frames
+                    elif not warned_bytes:
+                        warned_bytes = True
+                        await send(ws, {"type": "error",
+                                        "message": "audio ignored: not the "
+                                                   "mic-stream owner"})
+                    continue
+                raw = msg.get("text")
+                if raw is None:
+                    continue
                 # Contain per-frame failures (bad JSON, missing keys, invalid
                 # Action payloads): report an error frame, keep the socket up.
                 try:
@@ -346,6 +455,13 @@ def build_app(engine_name: str = "mock", mic: bool = False,
             pass
         finally:
             clients.discard(ws)
+            if stream["owner"] is ws:
+                # Release in a SEPARATE task: on disconnect this coroutine is
+                # being torn down (possibly already cancelled), and awaiting
+                # here would die mid-release — the released/status broadcasts
+                # must still reach the surviving clients.
+                asyncio.get_running_loop().create_task(
+                    release_stream("owner disconnected"))
 
     # ---------------------------------------------------------------- audio hub
     # Queues + Silero VAD + wake-word scorer + the consumer tasks bridging

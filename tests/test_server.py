@@ -342,6 +342,147 @@ def test_default_models_include_hey_jarvis_wake():
     assert DEFAULT_MODELS["wake"] == "hey_jarvis_v0.1"
 
 
+# ---------------------------------------------------- browser mic streaming
+def _amp_vad(monkeypatch):
+    """Hub without onnxruntime models: amplitude-threshold fake Silero, so
+    loud s16le frames count as speech and zeros as silence."""
+    import numpy as np
+    import scribe.audio.vad as vadmod
+
+    class AmpVAD:
+        def __call__(self, frame):
+            return 1.0 if float(np.abs(frame).max()) > 0.1 else 0.0
+
+        def reset(self):
+            pass
+
+    monkeypatch.setattr(vadmod, "SileroVAD", AmpVAD)
+
+
+def _pcm(value, frames):
+    import numpy as np
+    return np.full(512 * frames, value, dtype="<i2").tobytes()
+
+
+SPEECH = _pcm(20000, 20)     # ~0.64 s loud  (> min_s speech)
+SILENCE = _pcm(0, 20)        # ~0.64 s quiet (> end_silence_ms)
+
+
+def test_browser_stream_claim_dictate_release(monkeypatch):
+    _amp_vad(monkeypatch)
+    client = TestClient(build_app("mock", wakeword_models={}))
+    with client.websocket_connect("/ws") as ws:
+        _drain_until(ws, "status")
+        ws.send_json({"type": "mic_stream", "action": "start"})
+        assert _drain_until(ws, "mic_stream")["state"] == "granted"
+        # stream starts muted (wake-word gate) — unmute like "hey Jarvis" would
+        _drain_until(ws, "status", state="muted", detail="browser mic claimed")
+        ws.send_json({"type": "intent", "name": "wake"})
+        _drain_until(ws, "status", state="listening")
+
+        ws.send_bytes(SPEECH)
+        ws.send_bytes(SILENCE)
+        _drain_until(ws, "status", state="heard")     # chunker closed it
+        reply = _drain_until(ws, "reply")             # mock engine audio ack
+        assert "(mock) heard" in reply["text"]
+
+        ws.send_json({"type": "mic_stream", "action": "stop"})
+        rel = _drain_until(ws, "mic_stream", state="released")
+        assert rel["reason"] == "stopped"
+
+
+def test_browser_stream_muted_audio_is_dropped(monkeypatch):
+    _amp_vad(monkeypatch)
+    client = TestClient(build_app("mock", wakeword_models={}))
+    with client.websocket_connect("/ws") as ws:
+        _drain_until(ws, "status")
+        ws.send_json({"type": "mic_stream", "action": "start"})
+        _drain_until(ws, "mic_stream")
+        # muted (never woke): speech must not reach the engine; the socket
+        # stays healthy and typed utterances still round-trip
+        ws.send_bytes(SPEECH)
+        ws.send_bytes(SILENCE)
+        ws.send_json({"type": "utterance", "text": "x"})
+        prop = _drain_until(ws, "proposal")
+        assert prop["action"]["latex"] == "x"
+
+
+def test_second_claim_denied_then_granted_after_release(monkeypatch):
+    _amp_vad(monkeypatch)
+    # `with TestClient(...)`: both ws sessions share ONE portal/event loop —
+    # broadcasts between concurrently-open sockets deadlock otherwise.
+    with TestClient(build_app("mock", wakeword_models={})) as client, \
+         client.websocket_connect("/ws") as ws1, \
+         client.websocket_connect("/ws") as ws2:
+        _drain_until(ws1, "status")
+        _drain_until(ws2, "status")
+        ws1.send_json({"type": "mic_stream", "action": "start"})
+        assert _drain_until(ws1, "mic_stream")["state"] == "granted"
+
+        ws2.send_json({"type": "mic_stream", "action": "start"})
+        denied = _drain_until(ws2, "mic_stream", state="denied")
+        assert "another client" in denied["reason"]
+
+        # non-owner audio: dropped, exactly one error frame ever
+        ws2.send_bytes(SILENCE)
+        err = _drain_until(ws2, "error")
+        assert "not the mic-stream owner" in err["message"]
+        ws2.send_bytes(SILENCE)
+        ws2.send_json({"type": "edit_preview", "target_id": "e1"})  # ping
+        while True:
+            m = ws2.receive_json()
+            assert m["type"] != "error"                # no second error
+            if m["type"] == "edit_preview":
+                break
+
+        ws1.send_json({"type": "mic_stream", "action": "stop"})
+        _drain_until(ws2, "mic_stream", state="released")
+        ws2.send_json({"type": "mic_stream", "action": "start"})
+        assert _drain_until(ws2, "mic_stream", state="granted")
+
+
+def test_owner_disconnect_releases_stream(monkeypatch):
+    _amp_vad(monkeypatch)
+    # shared portal: see test_second_claim_denied_then_granted_after_release
+    with TestClient(build_app("mock", wakeword_models={})) as client, \
+         client.websocket_connect("/ws") as ws2:
+        _drain_until(ws2, "status")
+        with client.websocket_connect("/ws") as ws1:
+            _drain_until(ws1, "status")
+            ws1.send_json({"type": "mic_stream", "action": "start"})
+            _drain_until(ws1, "mic_stream", state="granted")
+        rel = _drain_until(ws2, "mic_stream", state="released")
+        assert "disconnected" in rel["reason"]
+        ws2.send_json({"type": "mic_stream", "action": "start"})
+        assert _drain_until(ws2, "mic_stream")["state"] == "granted"
+
+
+def test_claim_denied_in_mic_mode(monkeypatch):
+    _fake_mic_stack(monkeypatch)
+    client = TestClient(build_app("mock", mic=True, wakeword_models={}))
+    with client.websocket_connect("/ws") as ws:
+        _drain_until(ws, "status")
+        ws.send_json({"type": "mic_stream", "action": "start"})
+        denied = _drain_until(ws, "mic_stream", state="denied")
+        assert "server owns the mic" in denied["reason"]
+
+
+def test_mic_tester_works_with_browser_stream(monkeypatch):
+    _amp_vad(monkeypatch)
+    client = TestClient(build_app("mock", wakeword_models={}))
+    with client.websocket_connect("/ws") as ws:
+        _drain_until(ws, "status")
+        ws.send_json({"type": "mic_stream", "action": "start"})
+        _drain_until(ws, "mic_stream", state="granted")
+        ws.send_json({"type": "mic", "action": "test_start"})
+        _drain_until(ws, "status", detail="mic test on")
+        ws.send_bytes(SILENCE)
+        lvl = _drain_until(ws, "miclevel")
+        assert lvl["rms"] == 0.0 and lvl["prob"] == 0.0
+        ws.send_json({"type": "mic", "action": "test_stop"})
+        _drain_until(ws, "status", detail="mic test off")
+
+
 # ------------------------------------------------------------- edit_preview
 def test_edit_preview_relays_without_mutation_or_logging():
     from pathlib import Path

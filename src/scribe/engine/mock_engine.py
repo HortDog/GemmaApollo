@@ -34,7 +34,12 @@ class MockEngine:
     name = "mock"
 
     def process(self, audio, doc_context: str) -> EngineResult:
-        raise NotImplementedError("mock engine is text-only; use process_text")
+        # No ASR: acknowledge the audio so the browser-mic path is
+        # smoke-testable end to end without a GPU.
+        secs = getattr(audio, "size", 0) / 16000
+        return EngineResult(
+            action=TextReply(text=f"(mock) heard {secs:.1f}s of audio"),
+            transcript=None, engine=self.name, latency_ms={"total": 0.0})
 
     def process_text(self, transcript: str, doc_context: str) -> EngineResult:
         t0 = time.perf_counter()
