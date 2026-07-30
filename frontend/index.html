@@ -202,10 +202,11 @@
     <button id="scratchbtn" class="warn">Scratch that</button>
     <button id="undobtn">Undo</button>
     <button id="mutebtn" style="display:none" title="Mic gate — muted until you unmute or say “Hey Jarvis”">Mute</button>
+    <button id="micbtn" style="display:none" title="Stream this device's microphone to the scribe server">Start mic</button>
   </div>
   <div class="row" id="microw" style="margin-top:8px; display:none">
     <label for="micsel" class="miclabel">mic</label>
-    <select id="micsel" title="Input device (server-side)"></select>
+    <select id="micsel" title="Input device"></select>
     <button id="mictest" class="mini">test mic</button>
     <div id="levelwrap" title="input level; green = VAD hears speech"><div id="levelbar"></div></div>
     <span id="micvad" class="miclabel"></span>
@@ -383,12 +384,25 @@ function handleServerFrame(msg){
       pending = null; renderPending();
       log(msg.action||{action:'error'}, 'discarded', msg.message);
       break;
+    case 'mic_stream':
+      if(msg.state==='granted'){ onMicGranted(); }
+      else if(msg.state==='denied'){
+        log({action:'mic_stream', state:'denied'}, 'info', msg.reason);
+        resetMicBtn();
+      } else if(msg.state==='released'){
+        if(mic.on) stopMicCapture(false);   // server released us (or another owner)
+        resetMicBtn();
+      }
+      break;
     case 'mics': {
-      // server-side device list -> dropdown (panel only shows in mic mode)
+      // server-side device list -> dropdown. This frame only arrives in
+      // --mic mode: the SERVER owns a mic, so browser streaming is off.
       const row = document.getElementById('microw');
       const sel = document.getElementById('micsel');
       row.style.display = 'flex';
       document.getElementById('mutebtn').style.display = '';  // mic mode only
+      document.getElementById('micbtn').style.display = 'none';
+      mic.browser = false;
       sel.innerHTML = '';
       for(const d of msg.devices){
         const o = document.createElement('option');
@@ -430,8 +444,96 @@ document.getElementById('mutebtn').onclick = ()=>{
   wsSend({type:'intent', name: micMuted ? 'wake' : 'mute'});
 };
 
+// ---------- browser mic (getUserMedia -> s16le binary ws frames) ----------
+// This tab claims streaming rights (PROTOCOL.md `mic_stream`), captures RAW
+// audio (AEC/NS/AGC off so training wavs match the sounddevice path), the
+// worklet downsamples to 16 kHz s16le, and 512-sample frames go out as
+// binary ws messages. Server-side VAD/wake-words/chunking are identical to
+// --mic mode, so "hey Jarvis" and commit/undo/scratch work while streaming.
+let mic = {on:false, browser:true, stream:null, ctx:null, node:null, deviceId:null};
+
+async function startMicCapture(){
+  const audio = {channelCount:1, echoCancellation:false,
+                 noiseSuppression:false, autoGainControl:false};
+  if(mic.deviceId) audio.deviceId = {exact: mic.deviceId};
+  mic.stream = await navigator.mediaDevices.getUserMedia({audio});
+  mic.ctx = new AudioContext({sampleRate:16000});  // hint; worklet resamples anyway
+  await mic.ctx.audioWorklet.addModule('mic-worklet.js');
+  mic.node = new AudioWorkletNode(mic.ctx, 'pcm16-downsampler');
+  mic.node.port.onmessage = e=>{
+    // drop when the socket backs up — the VAD tolerates gaps; stalling doesn't
+    if(ws && ws.readyState===1 && ws.bufferedAmount < 65536) ws.send(e.data);
+  };
+  mic.ctx.createMediaStreamSource(mic.stream).connect(mic.node);
+  populateBrowserMics();   // device labels appear once permission is granted
+}
+
+function stopMicCapture(sendStop){
+  if(mic.node){ try{ mic.node.disconnect(); }catch(e){} mic.node = null; }
+  if(mic.stream){ mic.stream.getTracks().forEach(t=>t.stop()); mic.stream = null; }
+  if(mic.ctx){ try{ mic.ctx.close(); }catch(e){} mic.ctx = null; }
+  if(mic.on && sendStop) wsSend({type:'mic_stream', action:'stop'});
+  mic.on = false;
+}
+
+async function onMicGranted(){
+  try{
+    await startMicCapture();
+  }catch(err){
+    log({action:'mic_stream'}, 'discarded', 'mic failed: ' + err.message);
+    wsSend({type:'mic_stream', action:'stop'});   // give the claim back
+    resetMicBtn();
+    return;
+  }
+  mic.on = true;
+  const b = document.getElementById('micbtn');
+  b.textContent = 'Stop mic'; b.classList.add('warn');
+  document.getElementById('microw').style.display = 'flex';
+  document.getElementById('mutebtn').style.display = '';
+}
+
+function resetMicBtn(){
+  const b = document.getElementById('micbtn');
+  b.textContent = 'Start mic'; b.classList.remove('warn');
+  if(!mic.on && mic.browser){
+    document.getElementById('microw').style.display = 'none';
+    document.getElementById('mutebtn').style.display = 'none';
+  }
+}
+
+async function populateBrowserMics(){
+  if(!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+  const sel = document.getElementById('micsel');
+  const devs = (await navigator.mediaDevices.enumerateDevices())
+               .filter(d=>d.kind==='audioinput');
+  sel.innerHTML = '';
+  for(const d of devs){
+    const o = document.createElement('option');
+    o.value = d.deviceId;
+    o.textContent = d.label || `mic ${sel.children.length + 1}`;
+    if(mic.deviceId ? d.deviceId===mic.deviceId : d.deviceId==='default') o.selected = true;
+    sel.appendChild(o);
+  }
+}
+
+document.getElementById('micbtn').onclick = ()=>{
+  if(mic.on){ stopMicCapture(true); resetMicBtn(); return; }
+  wsSend({type:'mic_stream', action:'start'});   // stream begins on `granted`
+};
+
 let micTesting = false;
-document.getElementById('micsel').onchange = e=>{
+document.getElementById('micsel').onchange = async e=>{
+  if(mic.browser){
+    // browser mode: swap the local capture device; ownership is unaffected
+    mic.deviceId = e.target.value || null;
+    if(mic.on){
+      stopMicCapture(false); mic.on = true;   // keep the claim, restart capture
+      try{ await startMicCapture(); }
+      catch(err){ mic.on = false; stopMicCapture(true); resetMicBtn();
+                  log({action:'mic_stream'}, 'discarded', 'mic failed: ' + err.message); }
+    }
+    return;
+  }
   wsSend({type:'mic', action:'select', device: parseInt(e.target.value, 10)});
 };
 document.getElementById('mictest').onclick = ()=>{
@@ -446,10 +548,14 @@ document.getElementById('mictest').onclick = ()=>{
 
 function connectWs(){
   try{
-    ws = new WebSocket(`ws://${location.host}/ws`);
+    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${scheme}://${location.host}/ws`);
   }catch(e){ setNet(false); return; }
   ws.onopen = ()=>{
     setNet(true);
+    // Browser-mic entry point; hidden again if a `mics` frame reveals the
+    // server owns a sounddevice mic (--mic mode).
+    document.getElementById('micbtn').style.display = '';
     // The server owns DocState and starts empty; drop the local seed (and its
     // undo history) so the UI mirrors server state. (No resync frame yet.)
     lines = []; pending = null; editingId = null; undoStack = []; previews = {}; renderDoc();
@@ -458,10 +564,13 @@ function connectWs(){
   ws.onmessage = ev=>{ try{ handleServerFrame(JSON.parse(ev.data)); }catch(e){} };
   ws.onclose = ()=>{
     setNet(false);
+    stopMicCapture(false);                 // server is gone: stop local capture
+    resetMicBtn();
     document.getElementById('engname').textContent = 'local toy router';
     document.getElementById('vstate').textContent = '';
     document.getElementById('microw').style.display = 'none';
     document.getElementById('mutebtn').style.display = 'none';
+    document.getElementById('micbtn').style.display = 'none';
     previews = {};
     micTesting = false;
     document.getElementById('mictest').textContent = 'test mic';
