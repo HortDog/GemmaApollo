@@ -67,15 +67,27 @@ edits are positives, scratches are negatives, wake-word fires are audited.
 ## Commands
 
 ```bash
-uv run scribe serve [--engine mock|s2l] [--mic] [--mic-device N] [--port 8017]
+uv run scribe serve [--engine mock|s2l|remote] [--mic] [--host H] [--port 8017]
+uv run scribe model-server [--engine s2l] [--preload] [--host H] [--port 8018]
 uv run scribe bench --engine s2l     # per-stage latency + CER on fixture clips
 uv run scribe mics                   # list audio input devices
 uv run scribe mic-test --seconds 10  # console level/VAD tester
 uv run pytest                        # schema/router/docstate/ws tests (no GPU)
 ```
 
-The web UI includes a mic device dropdown and a live level/VAD test bar when
+Prefer `uv sync --all-extras` — a bare `uv sync` uninstalls the extras.
+
+The web UI includes a **Start mic** button (browser-mic streaming over the
+ws), plus the server-device dropdown and live level/VAD test bar when
 serving with `--mic`.
+
+## Multi-machine use
+
+The scribe also runs as three tiers over a Tailscale network: an **Electron
+desktop app** per client (frozen Python sidecar + browser mic, `desktop/`),
+a **Dockerized model server** on the GPU box (`docker/`), and a central
+training-data store (`POST /log`) so every client's accepted utterances land
+in one dataset. Runbook: [docs/deploy.md](docs/deploy.md).
 
 ## Status
 

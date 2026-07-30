@@ -49,11 +49,19 @@ Two engines implement one interface (`src/scribe/engine/base.py`):
 ## Commands
 
 ```
-uv sync                                   # env
+uv sync --all-extras                      # env (bare `uv sync` uninstalls extras)
 uv run scribe serve                       # FastAPI + ws on :8017, serves frontend/
+uv run scribe serve --engine remote       # app server -> model server over HTTP
+uv run scribe model-server --preload      # Engine-over-HTTP + central /log on :8018
 uv run scribe bench --engine s2l          # latency benchmark on fixture clips
 uv run pytest                             # tests (schema, router, docstate are pure-python)
+tools/build/build_sidecar.ps1             # PyInstaller-freeze the app tier (torch-free)
+cd desktop && npm start                   # Electron shell (dev; see docs/deploy.md)
 ```
+
+Deployment (Electron clients + Docker model server over Tailscale):
+docs/deploy.md. The app tier (audio extra) is torch-free by design — Silero
+VAD runs the vendored models/vad/silero_vad.onnx on onnxruntime.
 
 ## Conventions
 
